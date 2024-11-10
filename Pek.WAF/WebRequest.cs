@@ -4,7 +4,9 @@ using Microsoft.Net.Http.Headers;
 
 using NewLife.Caching;
 
+#if NET8_0_OR_GREATER
 using IPNetwork = System.Net.IPNetwork;
+#endif
 
 namespace Pek.WAF;
 
@@ -46,8 +48,37 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public Boolean InSubnet(String ip, Int32 mask)
     {
+#if NET8_0_OR_GREATER
         var network = new IPNetwork(IPAddress.Parse(ip), mask);
         return network.Contains(request.HttpContext.Connection.RemoteIpAddress!);
+#elif NET6_0 || NET7_0
+        var ipAddress = IPAddress.Parse(ip);
+        var remoteIpAddress = request.HttpContext.Connection.RemoteIpAddress;
+
+        if (remoteIpAddress == null)
+        {
+            return false;
+        }
+
+        var ipBytes = ipAddress.GetAddressBytes();
+        var remoteIpBytes = remoteIpAddress.GetAddressBytes();
+        var maskBytes = BitConverter.GetBytes(~((1 << (32 - mask)) - 1));
+
+        if (BitConverter.IsLittleEndian)
+        {
+            Array.Reverse(maskBytes);
+        }
+
+        for (var i = 0; i < ipBytes.Length; i++)
+        {
+            if ((ipBytes[i] & maskBytes[i]) != (remoteIpBytes[i] & maskBytes[i]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+#endif
     }
 
     public Boolean IpInFile(String path)
