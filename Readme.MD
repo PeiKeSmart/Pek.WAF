@@ -1,3 +1,3 @@
-﻿# Pek.AspNetCore - AspNetCore基类
+﻿# Pek.WAF - WAF防火墙
 
-AspNetCore基类
+基于DH框架的Kestrel Web 服务器的基本 WAF库
