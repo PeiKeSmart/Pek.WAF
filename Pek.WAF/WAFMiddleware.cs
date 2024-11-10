@@ -13,11 +13,11 @@ public class WAFMiddleware
 
     public WAFMiddleware(RequestDelegate next,
         ICacheProvider cache,
-        IOptions<Rule> ruleset)
+        IOptionsMonitor<Rule> ruleset)
     {
         this.next = next;
 
-        compiledRule = new MRE().CompileRule<WebRequest>(ruleset.Value);
+        compiledRule = new MRE().CompileRule<WebRequest>(ruleset.CurrentValue);
 
         cacheProvider = cache;
     }
