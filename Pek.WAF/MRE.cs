@@ -35,8 +35,10 @@ public class MRE
     private static readonly Lazy<MethodInfo?> _miDecimalTryParse = new(() =>
         typeof(Decimal).GetMethod("TryParse", new Type[] { typeof(string), Type.GetType("System.Decimal&") }));
 
-    public Func<T, bool> CompileRule<T>(Rule r)
+    public Func<T, Boolean> CompileRule<T>(Rule r)
     {
+        if (r == null) return _ => true;
+
         var paramUser = Expression.Parameter(typeof(T));
         var expr = GetExpressionForRule(typeof(T), r, paramUser);
 
