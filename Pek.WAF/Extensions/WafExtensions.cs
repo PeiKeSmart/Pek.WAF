@@ -3,8 +3,7 @@
 public static class WafExtensions {
     public static IServiceCollection AddWebFirewall(this IServiceCollection services, IConfiguration configuration)
     {
-        services.Configure<Rule>(opt => configuration.GetSection("Ruleset").Bind(opt));
-
+        services.Configure<Rule>(configuration.GetSection("Ruleset"));
 
         return services;
     }
