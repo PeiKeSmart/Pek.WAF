@@ -1,18 +1,15 @@
 ﻿using Microsoft.Extensions.Options;
 
 using NewLife.Caching;
-using NewLife.Common;
 using NewLife.Log;
-using NewLife.Serialization;
 
 namespace Pek.WAF;
 
-public class WAFMiddleware
-{
+public class WAFMiddleware {
     private readonly RequestDelegate next;
     private Func<WebRequest, Boolean> compiledRule = default!;
     private readonly ICacheProvider cacheProvider;
-    private readonly object ruleLock = new object();
+    private readonly Object ruleLock = new();
 
     public WAFMiddleware(RequestDelegate next,
         ICacheProvider cache,
@@ -48,6 +45,6 @@ public class WAFMiddleware
             return;
         }
 
-        await next.Invoke(context);
+        await next.Invoke(context).ConfigureAwait(false);
     }
 }
