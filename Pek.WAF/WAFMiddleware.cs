@@ -39,7 +39,7 @@ public class WAFMiddleware {
 
         if (compiledRule(wr))
         {
-            XTrace.Log.Warn($"Forbidden request from {wr.RemoteIp}");
+            //XTrace.Log.Warn($"Forbidden request from {wr.RemoteIp}");
 
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
