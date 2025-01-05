@@ -1,8 +1,7 @@
 ﻿using Microsoft.Extensions.Options;
 
 using NewLife.Caching;
-
-using Pek.Log;
+using NewLife.Log;
 
 namespace Pek.WAF;
 
@@ -40,7 +39,7 @@ public class WAFMiddleware {
 
         if (compiledRule(wr))
         {
-            DTrace.Log.Warn($"[WAFMiddleware.Invoke]:Forbidden request from {wr.RemoteIp}");
+            XTrace.Log.Warn($"[WAFMiddleware.Invoke]:Forbidden request from {wr.RemoteIp}");
 
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
