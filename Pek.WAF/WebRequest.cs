@@ -1,4 +1,5 @@
 ﻿using System.Net;
+using System.Net.Sockets;
 
 using Microsoft.Net.Http.Headers;
 
@@ -12,6 +13,8 @@ namespace Pek.WAF;
 
 public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 {
+    private String? _remoteIpCache;
+
     public String? Method => request.Method;
 
     public String? Path => request.Path.Value;
@@ -22,7 +25,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public String? UserAgent => request.Headers[HeaderNames.UserAgent].ToString();
 
-    public String? RemoteIp => request.HttpContext.Connection.RemoteIpAddress?.ToString();
+    public String? RemoteIp => _remoteIpCache ??= request.HttpContext.Connection.RemoteIpAddress?.ToString();
 
     public Boolean Authenticated => request.HttpContext.User.Identity?.IsAuthenticated == true;
 
@@ -105,52 +108,42 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// <returns>如果IP在列表中返回true，否则返回false</returns>
     public Boolean IsInIpList(String ipList)
     {
-        if (String.IsNullOrWhiteSpace(ipList) || String.IsNullOrWhiteSpace(RemoteIp))
-            return false;
-
         var remoteIpAddress = request.HttpContext.Connection.RemoteIpAddress;
-        if (remoteIpAddress == null)
+        if (remoteIpAddress == null || String.IsNullOrWhiteSpace(ipList))
             return false;
 
-        // 分割IP列表（支持逗号和分号）
-        var ipEntries = ipList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var remoteIpStr = RemoteIp;
+        if (String.IsNullOrWhiteSpace(remoteIpStr))
+            return false;
 
-        foreach (var ipEntry in ipEntries)
+        // 尝试从缓存获取解析后的规则
+        var cacheKey = $"IPList:{ipList}";
+        var parsedRules = cacheProvider.Cache.Get<ParsedIpRule[]>(cacheKey);
+        
+        if (parsedRules == null)
         {
-            var entry = ipEntry.Trim();
-            if (String.IsNullOrEmpty(entry))
-                continue;
+            parsedRules = ParseIpList(ipList);
+            cacheProvider.Cache.Set(cacheKey, parsedRules, 300); // 缓存5分钟
+        }
 
-            // 1. CIDR 格式检查 (例如: 192.168.1.0/24)
-            if (entry.Contains('/'))
+        // 快速匹配
+        foreach (var rule in parsedRules)
+        {
+            if (rule.Type == IpRuleType.Exact)
             {
-                var parts = entry.Split('/');
-                if (parts.Length == 2 && Int32.TryParse(parts[1], out var mask))
-                {
-                    try
-                    {
-                        if (InSubnet(parts[0], mask))
-                            return true;
-                    }
-                    catch
-                    {
-                        // 忽略无效的CIDR格式
-                    }
-                }
-                continue;
-            }
-
-            // 2. 通配符格式检查 (例如: 192.168.*.* 或 10.0.1.*)
-            if (entry.Contains('*'))
-            {
-                if (MatchWildcardIp(RemoteIp, entry))
+                if (String.Equals(remoteIpStr, rule.Value, StringComparison.Ordinal))
                     return true;
-                continue;
             }
-
-            // 3. 精确匹配
-            if (String.Equals(RemoteIp, entry, StringComparison.OrdinalIgnoreCase))
-                return true;
+            else if (rule.Type == IpRuleType.Cidr)
+            {
+                if (rule.Mask.HasValue && IsInSubnetFast(remoteIpAddress, rule.ParsedIp!, rule.Mask.Value))
+                    return true;
+            }
+            else if (rule.Type == IpRuleType.Wildcard)
+            {
+                if (MatchWildcardIpFast(remoteIpStr, rule.Value!))
+                    return true;
+            }
         }
 
         return false;
@@ -161,23 +154,142 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// <returns>如果IP不在列表中返回true，否则返回false</returns>
     public Boolean IsNotInIpList(String ipList) => !IsInIpList(ipList);
 
-    private Boolean MatchWildcardIp(String ip, String pattern)
+    private static ParsedIpRule[] ParseIpList(String ipList)
     {
-        var ipParts = ip.Split('.');
-        var patternParts = pattern.Split('.');
+        var entries = ipList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var rules = new List<ParsedIpRule>(entries.Length);
 
-        if (ipParts.Length != 4 || patternParts.Length != 4)
-            return false;
-
-        for (var i = 0; i < 4; i++)
+        foreach (var entry in entries)
         {
-            if (patternParts[i] == "*")
+            if (String.IsNullOrEmpty(entry))
                 continue;
 
-            if (!String.Equals(ipParts[i], patternParts[i], StringComparison.OrdinalIgnoreCase))
-                return false;
+            // CIDR 格式
+            var slashIdx = entry.IndexOf('/');
+            if (slashIdx > 0 && slashIdx < entry.Length - 1)
+            {
+                if (Int32.TryParse(entry.AsSpan(slashIdx + 1), out var mask) && 
+                    IPAddress.TryParse(entry.AsSpan(0, slashIdx), out var ip))
+                {
+                    rules.Add(new ParsedIpRule(IpRuleType.Cidr, entry, ip, mask));
+                    continue;
+                }
+            }
+
+            // 通配符格式
+            if (entry.IndexOf('*') >= 0)
+            {
+                rules.Add(new ParsedIpRule(IpRuleType.Wildcard, entry, null, null));
+                continue;
+            }
+
+            // 精确匹配
+            rules.Add(new ParsedIpRule(IpRuleType.Exact, entry, null, null));
         }
 
-        return true;
+        return [.. rules];
     }
+
+    private static Boolean IsInSubnetFast(IPAddress remoteIp, IPAddress networkIp, Int32 mask)
+    {
+#if NET8_0_OR_GREATER
+        var network = new IPNetwork(networkIp, mask);
+        return network.Contains(remoteIp);
+#else
+        if (remoteIp.AddressFamily != networkIp.AddressFamily)
+            return false;
+
+        var remoteBytes = remoteIp.GetAddressBytes();
+        var networkBytes = networkIp.GetAddressBytes();
+        
+        if (remoteIp.AddressFamily == AddressFamily.InterNetwork)
+        {
+            // IPv4
+            var maskValue = mask >= 32 ? 0 : ~((1u << (32 - mask)) - 1);
+            var maskBytes = BitConverter.GetBytes(maskValue);
+            if (BitConverter.IsLittleEndian)
+                Array.Reverse(maskBytes);
+
+            for (var i = 0; i < 4; i++)
+            {
+                if ((remoteBytes[i] & maskBytes[i]) != (networkBytes[i] & maskBytes[i]))
+                    return false;
+            }
+            return true;
+        }
+        else
+        {
+            // IPv6
+            var fullBytes = mask / 8;
+            var remainingBits = mask % 8;
+
+            for (var i = 0; i < fullBytes; i++)
+            {
+                if (remoteBytes[i] != networkBytes[i])
+                    return false;
+            }
+
+            if (remainingBits > 0 && fullBytes < remoteBytes.Length)
+            {
+                var maskByte = (Byte)(0xFF << (8 - remainingBits));
+                if ((remoteBytes[fullBytes] & maskByte) != (networkBytes[fullBytes] & maskByte))
+                    return false;
+            }
+
+            return true;
+        }
+#endif
+    }
+
+    private static Boolean MatchWildcardIpFast(ReadOnlySpan<Char> ip, ReadOnlySpan<Char> pattern)
+    {
+        var ipSegments = 0;
+        var patternSegments = 0;
+        var ipStart = 0;
+        var patternStart = 0;
+
+        for (var i = 0; i <= ip.Length && i <= pattern.Length; i++)
+        {
+            var ipEnded = i == ip.Length || (i < ip.Length && ip[i] == '.');
+            var patternEnded = i == pattern.Length || (i < pattern.Length && pattern[i] == '.');
+
+            if (ipEnded && patternEnded)
+            {
+                var ipSegment = ip.Slice(ipStart, i - ipStart);
+                var patternSegment = pattern.Slice(patternStart, i - patternStart);
+
+                if (patternSegment.Length == 1 && patternSegment[0] == '*')
+                {
+                    // 通配符匹配，跳过
+                }
+                else if (!ipSegment.SequenceEqual(patternSegment))
+                {
+                    return false;
+                }
+
+                ipSegments++;
+                patternSegments++;
+                ipStart = i + 1;
+                patternStart = i + 1;
+
+                if (i == ip.Length && i == pattern.Length)
+                    break;
+            }
+            else if (ipEnded != patternEnded)
+            {
+                return false;
+            }
+        }
+
+        return ipSegments == 4 && patternSegments == 4;
+    }
+
+    private enum IpRuleType : byte
+    {
+        Exact,
+        Cidr,
+        Wildcard
+    }
+
+    private readonly record struct ParsedIpRule(IpRuleType Type, String Value, IPAddress? ParsedIp, Int32? Mask);
 }
