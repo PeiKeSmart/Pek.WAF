@@ -30,6 +30,7 @@ public class WAFMiddleware {
         lock (ruleLock)
         {
             compiledRule = new MRE().CompileRule<WebRequest>(rule);
+            XTrace.Log.Info($"[WAFMiddleware.UpdateCompiledRule]:规则已更新 - {rule}");
         }
     }
 
@@ -37,9 +38,16 @@ public class WAFMiddleware {
     {
         var wr = new WebRequest(context.Request, cacheProvider);
 
+        // Debug 级别：记录每个请求的评估过程
+        if (XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        {
+            XTrace.Log.Debug($"[WAFMiddleware.Invoke]:评估请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}");
+        }
+
         if (compiledRule(wr))
         {
-            XTrace.Log.Warn($"[WAFMiddleware.Invoke]:Forbidden request from {wr.RemoteIp}");
+            // Warn 级别：记录被拦截的请求详情
+            XTrace.Log.Warn($"[WAFMiddleware.Invoke]:拦截请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}, UserAgent:{wr.UserAgent}");
 
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
