@@ -316,9 +316,9 @@ public class MRE
         }
         else //Invoke a method on the Property
         {
-            var inputs = rule.Inputs.Select(x => x.GetType()).ToArray();
+            var inputs = rule.Inputs?.Select(x => x.GetType()).ToArray() ?? [];
             var methodInfo = propType.GetMethod(rule.Operator, inputs);
-            List<Expression> expressions = new();
+            List<Expression> expressions = [];
 
             if (methodInfo == null)
             {
@@ -327,22 +327,48 @@ public class MRE
                 {
                     var parameters = methodInfo.GetParameters();
                     var i = 0;
-                    foreach (var item in rule.Inputs)
+                    foreach (var item in rule.Inputs!)
                     {
                         expressions.Add(MRE.StringToExpression(item, parameters[i].ParameterType));
                         i++;
                     }
                 }
+                else
+                {
+                    // 尝试查找扩展方法
+                    methodInfo = FindExtensionMethod(propType, rule.Operator, inputs);
+                    if (methodInfo != null)
+                    {
+                        // 扩展方法：第一个参数是 this，后续是实际参数
+                        var parameters = methodInfo.GetParameters();
+                        for (var i = 0; i < (rule.Inputs?.Count ?? 0); i++)
+                        {
+                            expressions.Add(MRE.StringToExpression(rule.Inputs![i], parameters[i + 1].ParameterType));
+                        }
+                    }
+                }
             }
             else
-                expressions.AddRange(rule.Inputs.Select(Expression.Constant));
+                expressions.AddRange(rule.Inputs?.Select(Expression.Constant) ?? []);
+
             if (methodInfo == null)
                 throw new RulesException($"'{rule.Operator}' is not a method of '{propType.Name}");
 
+            Expression callExpression;
+            if (methodInfo.IsStatic && methodInfo.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false))
+            {
+                // 扩展方法：第一个参数是实例本身
+                var allArgs = new List<Expression> { propExpression };
+                allArgs.AddRange(expressions);
+                callExpression = Expression.Call(methodInfo, [.. allArgs]);
+            }
+            else
+            {
+                if (!methodInfo.IsGenericMethod)
+                    inputs = null; //Only pass in type information to a Generic Method
+                callExpression = Expression.Call(propExpression, rule.Operator, inputs, [.. expressions]);
+            }
 
-            if (!methodInfo.IsGenericMethod)
-                inputs = null; //Only pass in type information to a Generic Method
-            var callExpression = Expression.Call(propExpression, rule.Operator, inputs, expressions.ToArray());
             if (useTryCatch)
             {
                 return Expression.TryCatch(
@@ -359,6 +385,84 @@ public class MRE
     {
         return typeof(Enumerable).GetMethods(BindingFlags.Static | BindingFlags.Public)
             .FirstOrDefault(m => m.Name == name && m.GetParameters().Length == numParameter);
+    }
+
+    private static readonly Lazy<Dictionary<String, List<MethodInfo>>> _extensionMethodsCache = new(() =>
+    {
+        var cache = new Dictionary<String, List<MethodInfo>>(StringComparer.Ordinal);
+        
+        // 只扫描当前程序集中的扩展方法（性能优化 + 安全性）
+        var currentAssembly = typeof(MRE).Assembly;
+
+        try
+        {
+            var types = currentAssembly.GetTypes()
+                .Where(t => t.IsSealed && !t.IsGenericType && !t.IsNested);
+
+            foreach (var type in types)
+            {
+                var methods = type.GetMethods(BindingFlags.Static | BindingFlags.Public)
+                    .Where(m => m.IsDefined(typeof(System.Runtime.CompilerServices.ExtensionAttribute), false));
+
+                foreach (var method in methods)
+                {
+                    var key = method.Name;
+                    if (!cache.ContainsKey(key))
+                        cache[key] = [];
+                    cache[key].Add(method);
+                }
+            }
+        }
+        catch
+        {
+            // 理论上当前程序集不会加载失败，但保留异常处理以防万一
+        }
+
+        return cache;
+    });
+
+    private static MethodInfo? FindExtensionMethod(Type targetType, String methodName, Type[] parameterTypes)
+    {
+        if (!_extensionMethodsCache.Value.TryGetValue(methodName, out var candidates))
+            return null;
+
+        foreach (var method in candidates)
+        {
+            var parameters = method.GetParameters();
+            if (parameters.Length == 0)
+                continue;
+
+            // 第一个参数必须兼容目标类型
+            var firstParamType = parameters[0].ParameterType;
+            if (!firstParamType.IsAssignableFrom(targetType))
+                continue;
+
+            // 检查其余参数类型是否匹配
+            if (parameters.Length - 1 != parameterTypes.Length)
+                continue;
+
+            var match = true;
+            for (var i = 0; i < parameterTypes.Length; i++)
+            {
+                if (!parameters[i + 1].ParameterType.IsAssignableFrom(parameterTypes[i]))
+                {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match)
+                return method;
+        }
+
+        // 如果精确匹配失败，尝试只匹配方法名和参数数量
+        return candidates.FirstOrDefault(m =>
+        {
+            var parameters = m.GetParameters();
+            return parameters.Length > 0 &&
+                   parameters[0].ParameterType.IsAssignableFrom(targetType) &&
+                   parameters.Length == parameterTypes.Length + 1;
+        });
     }
 
     private static Expression StringToExpression(Object? value, Type propType)
