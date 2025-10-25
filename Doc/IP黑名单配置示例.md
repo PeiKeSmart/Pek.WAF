@@ -232,13 +232,65 @@ HTTP请求 → WAFMiddleware → 创建 WebRequest 对象
 
 ## 日志输出说明
 
+### 日志控制机制
+
+日志输出支持**两种控制方式**（满足任一条件即输出详细日志）：
+
+#### 方式一：通过 PekSysSetting 配置（✅ 推荐）
+
+在 `appsettings.json` 中配置：
+
+```json
+{
+  "PekSysSetting": {
+    "AllowRequestParams": true
+  }
+}
+```
+
+**优势：**
+- ✅ 无需修改日志级别，不影响其他模块的日志输出
+- ✅ 可以在生产环境临时开启调试，无需重启应用
+- ✅ 配置支持热重载，修改后立即生效
+- ✅ 只影响 WAF 相关的详细日志，精准控制
+- ✅ 适合生产环境排查问题
+
+#### 方式二：通过日志级别控制
+
+设置日志级别为 `Debug`：
+
+```csharp
+// Program.cs
+using NewLife.Log;
+
+XTrace.Log.Level = LogLevel.Debug;
+```
+
+或在 `appsettings.json` 中：
+
+```json
+{
+  "NewLife": {
+    "LogLevel": "Debug"
+  }
+}
+```
+
+**特点：**
+- 会影响所有使用 NewLife.Log 的模块
+- 适合开发环境全局调试
+
 ### 日志级别
 
 已添加的日志输出分为两个级别：
 
-#### 1. Debug 级别（调试用）
+#### 1. Debug 级别（详细调试日志）
 
-需要将日志级别设置为 Debug 才能看到：
+**触发条件（满足任一）：**
+- `PekSysSetting.Current.AllowRequestParams = true` （推荐）
+- 或 日志级别设置为 `Debug`
+
+**日志内容：**
 
 - **请求评估日志**: 每个请求都会记录
   ```
@@ -275,9 +327,11 @@ HTTP请求 → WAFMiddleware → 创建 WebRequest 对象
   [WebRequest.IsInIpList]:IP不在列表 - RemoteIP:192.168.1.200, 已检查规则数:5
   ```
 
-#### 2. Warn 级别（生产环境）
+#### 2. Warn/Info 级别（生产环境）
 
-默认日志级别即可看到：
+**触发条件：** 始终输出（无需配置）
+
+**日志内容：**
 
 - **拦截请求日志**: 请求被拦截时记录详细信息
   ```
@@ -289,23 +343,44 @@ HTTP请求 → WAFMiddleware → 创建 WebRequest 对象
   [WAFMiddleware.UpdateCompiledRule]:规则已更新 - Operator: OrElse, Rules: 3
   ```
 
-### 配置日志级别
+### 配置日志输出
 
-在 `appsettings.json` 中配置 NewLife 日志级别：
+#### 推荐配置（生产环境）
+
+在 `appsettings.json` 中：
 
 ```json
 {
+  "PekSysSetting": {
+    "AllowRequestParams": false  // 默认关闭，需要时临时开启
+  },
   "NewLife": {
-    "LogLevel": "Debug"
+    "LogLevel": "Info"  // 生产环境使用 Info 级别
   }
 }
 ```
 
-或在代码中设置：
+**需要调试时，只需临时修改：**
 
-```csharp
-// 开启 Debug 日志
-NewLife.Log.XTrace.Log.Level = NewLife.Log.LogLevel.Debug;
+```json
+{
+  "PekSysSetting": {
+    "AllowRequestParams": true  // 开启详细日志
+  }
+}
+```
+
+#### 开发环境配置
+
+```json
+{
+  "PekSysSetting": {
+    "AllowRequestParams": true  // 或者通过日志级别控制
+  },
+  "NewLife": {
+    "LogLevel": "Debug"  // 开发环境可以用 Debug
+  }
+}
 ```
 
 ## 测试验证步骤
@@ -324,16 +399,27 @@ NewLife.Log.XTrace.Log.Level = NewLife.Log.LogLevel.Debug;
 }
 ```
 
-### 2. 启用 Debug 日志
+### 2. 启用详细日志
+
+**方式一（推荐）：** 使用 PekSysSetting 配置
+
+在 `appsettings.json` 中添加：
+
+```json
+{
+  "PekSysSetting": {
+    "AllowRequestParams": true
+  }
+}
+```
+
+**方式二：** 设置日志级别
 
 ```csharp
 // Program.cs
 using NewLife.Log;
 
 XTrace.Log.Level = LogLevel.Debug;
-
-var builder = WebApplication.CreateBuilder(args);
-// ... 其他配置
 ```
 
 ### 3. 发送测试请求
@@ -370,11 +456,33 @@ curl http://localhost:5000/api/test --interface 192.168.1.2
 
 ### Q: 如何知道IP是否被拦截？
 
-A: 查看 Warn 级别日志，被拦截的请求会输出详细信息。
+A: 查看 Warn 级别日志，被拦截的请求会输出详细信息。无需任何配置，默认就会记录。
 
 ### Q: 为什么看不到 Debug 日志？
 
-A: 确保日志级别设置为 Debug: `XTrace.Log.Level = LogLevel.Debug;`
+A: 确保满足以下任一条件：
+- 在 `appsettings.json` 中设置 `PekSysSetting.AllowRequestParams = true`（推荐）
+- 或者设置日志级别：`XTrace.Log.Level = LogLevel.Debug;`
+
+### Q: 生产环境如何临时开启调试？
+
+A: 推荐使用 `PekSysSetting.AllowRequestParams` 配置：
+
+```json
+{
+  "PekSysSetting": {
+    "AllowRequestParams": true  // 修改此处即可，支持热重载
+  }
+}
+```
+
+这种方式不会影响其他模块的日志输出。
+
+### Q: AllowRequestParams 和日志级别的区别？
+
+A: 
+- **AllowRequestParams**: 只控制 WAF 相关的详细日志，精准控制，适合生产环境
+- **LogLevel = Debug**: 影响所有使用 NewLife.Log 的模块，日志量大，适合开发环境
 
 ### Q: IP列表支持域名吗？
 
@@ -390,11 +498,22 @@ A: 可以，使用 OrElse 或 AndAlso 组合多个规则。
 
 ## 最佳实践
 
-1. **生产环境**: 使用 Info 或 Warn 级别，只记录拦截日志
-2. **调试阶段**: 使用 Debug 级别，查看详细匹配过程
-3. **大量IP**: 使用 IpInFile 从文件加载，利用缓存机制
-4. **性能优先**: 优先使用 IsInIpList，支持多种格式且性能优异
+1. **生产环境**: 
+   - 日志级别使用 `Info` 或 `Warn`
+   - 默认关闭 `AllowRequestParams`
+   - 需要调试时临时开启 `AllowRequestParams`
+   
+2. **开发环境**: 
+   - 可以直接开启 `AllowRequestParams` 或使用 `Debug` 日志级别
+   - 查看详细的规则匹配过程
+   
+3. **大量IP**: 使用 `IpInFile` 从文件加载，利用缓存机制
+
+4. **性能优先**: 优先使用 `IsInIpList`，支持多种格式且性能优异
+
 5. **规则测试**: 先在测试环境验证规则，避免误拦截
+
+6. **日志控制**: 使用 `AllowRequestParams` 而非日志级别，避免影响其他模块
 
 ## 示例项目配置
 
@@ -409,8 +528,11 @@ A: 可以，使用 OrElse 或 AndAlso 组合多个规则。
     }
   },
   "NewLife": {
-    "LogLevel": "Debug",
+    "LogLevel": "Info",
     "LogPath": "Logs"
+  },
+  "PekSysSetting": {
+    "AllowRequestParams": false
   },
   "Ruleset": {
     "Operator": "OrElse",
@@ -431,6 +553,16 @@ A: 可以，使用 OrElse 或 AndAlso 组合多个规则。
         "TargetValue": "(?i)(bot|crawler|scanner)"
       }
     ]
+  }
+}
+```
+
+**生产环境调试时，只需修改：**
+
+```json
+{
+  "PekSysSetting": {
+    "AllowRequestParams": true  // 临时开启，排查完问题后改回 false
   }
 }
 ```

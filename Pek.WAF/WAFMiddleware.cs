@@ -3,6 +3,8 @@
 using NewLife.Caching;
 using NewLife.Log;
 
+using Pek.Configs;
+
 namespace Pek.WAF;
 
 public class WAFMiddleware {
@@ -38,8 +40,10 @@ public class WAFMiddleware {
     {
         var wr = new WebRequest(context.Request, cacheProvider);
 
-        // Debug 级别：记录每个请求的评估过程
-        if (XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
+        
+        if (allowDetailLog)
         {
             XTrace.Log.Debug($"[WAFMiddleware.Invoke]:评估请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}");
         }

@@ -5,6 +5,8 @@ using Microsoft.Net.Http.Headers;
 
 using NewLife.Caching;
 
+using Pek.Configs;
+
 #if NET8_0_OR_GREATER
 using IPNetwork = System.Net.IPNetwork;
 #endif
@@ -83,7 +85,8 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         }
 #endif
         
-        if (NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
         {
             NewLife.Log.XTrace.Log.Debug($"[WebRequest.InSubnet]:子网检查 - RemoteIP:{RemoteIp}, 网络:{ip}/{mask}, 匹配:{result}");
         }
@@ -101,7 +104,8 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             data = File.ReadAllLines(path);
             cacheProvider.Cache.Set<IEnumerable<String>>(keyname, data, 15 * 60);
             
-            if (NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+            // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+            if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
             {
                 NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:加载IP文件 - 文件:{path}, IP数量:{data.Count()}");
             }
@@ -109,7 +113,8 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         var result = data?.Contains(RemoteIp, StringComparer.OrdinalIgnoreCase) ?? false;
         
-        if (NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
         {
             NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:IP文件检查 - RemoteIP:{RemoteIp}, 文件:{path}, 匹配:{result}");
         }
@@ -139,12 +144,15 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         var cacheKey = $"IPList:{ipList}";
         var parsedRules = cacheProvider.Cache.Get<ParsedIpRule[]>(cacheKey);
         
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
+        
         if (parsedRules == null)
         {
             parsedRules = ParseIpList(ipList);
             cacheProvider.Cache.Set(cacheKey, parsedRules, 300); // 缓存5分钟
             
-            if (NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+            if (allowDetailLog)
             {
                 NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - 规则数量:{parsedRules.Length}, 原始列表:{ipList}");
             }
@@ -171,7 +179,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             
             if (matched)
             {
-                if (NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+                if (allowDetailLog)
                 {
                     NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP匹配成功 - RemoteIP:{remoteIpStr}, 规则类型:{rule.Type}, 规则值:{rule.Value}");
                 }
@@ -179,7 +187,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             }
         }
 
-        if (NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        if (allowDetailLog)
         {
             NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP不在列表 - RemoteIP:{remoteIpStr}, 已检查规则数:{parsedRules.Length}");
         }
