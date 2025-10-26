@@ -40,9 +40,6 @@ public class WAFMiddleware {
     {
         var wr = new WebRequest(context.Request, cacheProvider);
 
-        // 这条日志一定会输出，用来确认 Invoke 是否被调用（使用 DHWeb.GetUserHost 获取真实客户端 IP）
-        XTrace.Log.Warn($"[WAFMiddleware.Invoke]:请求到达 - IP:{wr.RemoteIp}, Path:{context.Request.Path}");
-
         // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
         var allowDetailLog = PekSysSetting.Current.AllowRequestParams || XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
         
