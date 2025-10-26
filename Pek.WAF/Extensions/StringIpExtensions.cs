@@ -21,6 +21,9 @@ public static class StringIpExtensions
     /// <returns>如果IP在列表中返回true，否则返回false</returns>
     public static Boolean IsInIpList(this String? remoteIp, String ipList)
     {
+        // 这条日志一定会输出，用来确认方法是否被调用
+        XTrace.Log.Warn($"[StringIpExtensions.IsInIpList]:方法被调用 - RemoteIP:'{remoteIp}', IPList:'{ipList}'");
+
         // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
         var allowDetailLog = PekSysSetting.Current.AllowRequestParams || XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
 
