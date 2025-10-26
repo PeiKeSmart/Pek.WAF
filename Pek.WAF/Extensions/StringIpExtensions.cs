@@ -1,6 +1,10 @@
 using System.Net;
 using System.Net.Sockets;
 
+using NewLife.Log;
+
+using Pek.Configs;
+
 namespace Pek.WAF.Extensions;
 
 /// <summary>String类型的IP相关扩展方法，用于WAF规则引擎</summary>
@@ -17,13 +21,43 @@ public static class StringIpExtensions
     /// <returns>如果IP在列表中返回true，否则返回false</returns>
     public static Boolean IsInIpList(this String? remoteIp, String ipList)
     {
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
+
+        if (allowDetailLog)
+        {
+            XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:开始检查 - RemoteIP:'{remoteIp}', IPList:'{ipList}'");
+        }
+
         if (String.IsNullOrWhiteSpace(remoteIp) || String.IsNullOrWhiteSpace(ipList))
+        {
+            if (allowDetailLog)
+            {
+                XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:参数为空 - RemoteIP IsNull:{String.IsNullOrWhiteSpace(remoteIp)}, IPList IsNull:{String.IsNullOrWhiteSpace(ipList)}");
+            }
             return false;
+        }
 
         if (!IPAddress.TryParse(remoteIp, out var remoteIpAddress))
+        {
+            if (allowDetailLog)
+            {
+                XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:IP解析失败 - RemoteIP:'{remoteIp}' 不是有效的IP地址");
+            }
             return false;
+        }
+
+        if (allowDetailLog)
+        {
+            XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:IP解析成功 - RemoteIP:'{remoteIp}', AddressFamily:{remoteIpAddress.AddressFamily}");
+        }
 
         var ipEntries = ipList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        if (allowDetailLog)
+        {
+            XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:分割IP列表 - 规则数量:{ipEntries.Length}");
+        }
 
         foreach (var entry in ipEntries)
         {
@@ -37,7 +71,12 @@ public static class StringIpExtensions
                 if (Int32.TryParse(entry.AsSpan(slashIdx + 1), out var mask) && 
                     IPAddress.TryParse(entry.AsSpan(0, slashIdx), out var networkIp))
                 {
-                    if (IsInSubnet(remoteIpAddress, networkIp, mask))
+                    var matched = IsInSubnet(remoteIpAddress, networkIp, mask);
+                    if (allowDetailLog)
+                    {
+                        XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:CIDR检查 - RemoteIP:'{remoteIp}', 规则:'{entry}', 匹配:{matched}");
+                    }
+                    if (matched)
                         return true;
                 }
                 continue;
@@ -46,14 +85,29 @@ public static class StringIpExtensions
             // 通配符格式
             if (entry.IndexOf('*') >= 0)
             {
-                if (MatchWildcardIp(remoteIp.AsSpan(), entry.AsSpan()))
+                var matched = MatchWildcardIp(remoteIp.AsSpan(), entry.AsSpan());
+                if (allowDetailLog)
+                {
+                    XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:通配符检查 - RemoteIP:'{remoteIp}', 规则:'{entry}', 匹配:{matched}");
+                }
+                if (matched)
                     return true;
                 continue;
             }
 
             // 精确匹配
-            if (String.Equals(remoteIp, entry, StringComparison.Ordinal))
+            var exactMatch = String.Equals(remoteIp, entry, StringComparison.Ordinal);
+            if (allowDetailLog)
+            {
+                XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:精确匹配 - RemoteIP:'{remoteIp}', 规则:'{entry}', 匹配:{exactMatch}");
+            }
+            if (exactMatch)
                 return true;
+        }
+
+        if (allowDetailLog)
+        {
+            XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:所有规则检查完毕 - RemoteIP:'{remoteIp}' 未匹配任何规则，返回 false");
         }
 
         return false;
