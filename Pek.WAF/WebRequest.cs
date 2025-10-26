@@ -6,6 +6,8 @@ using Microsoft.Net.Http.Headers;
 using NewLife.Caching;
 
 using Pek.Configs;
+using Pek.Helpers;
+using Pek.Webs;
 
 #if NET8_0_OR_GREATER
 using IPNetwork = System.Net.IPNetwork;
@@ -27,7 +29,10 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public String? UserAgent => request.Headers[HeaderNames.UserAgent].ToString();
 
-    public String? RemoteIp => _remoteIpCache ??= request.HttpContext.Connection.RemoteIpAddress?.ToString();
+    /// <summary>
+    /// 获取远程 IP 地址（通过 DHWeb.GetUserHost 获取真实客户端 IP，自动支持代理转发）
+    /// </summary>
+    public String? RemoteIp => _remoteIpCache ??= DHWeb.GetUserHost(request.HttpContext);
 
     public Boolean Authenticated => request.HttpContext.User.Identity?.IsAuthenticated == true;
 
@@ -53,17 +58,18 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public Boolean InSubnet(String ip, Int32 mask)
     {
-#if NET8_0_OR_GREATER
-        var network = new IPNetwork(IPAddress.Parse(ip), mask);
-        var result = network.Contains(request.HttpContext.Connection.RemoteIpAddress!);
-#elif NET6_0 || NET7_0
-        var ipAddress = IPAddress.Parse(ip);
-        var remoteIpAddress = request.HttpContext.Connection.RemoteIpAddress;
-
-        if (remoteIpAddress == null)
+        // 使用 RemoteIp（DHWeb.GetUserHost）获取真实客户端 IP
+        var remoteIpStr = RemoteIp;
+        if (String.IsNullOrWhiteSpace(remoteIpStr) || !IPAddress.TryParse(remoteIpStr, out var remoteIpAddress))
         {
             return false;
         }
+
+#if NET8_0_OR_GREATER
+        var network = new IPNetwork(IPAddress.Parse(ip), mask);
+        var result = network.Contains(remoteIpAddress);
+#elif NET6_0 || NET7_0
+        var ipAddress = IPAddress.Parse(ip);
 
         var ipBytes = ipAddress.GetAddressBytes();
         var remoteIpBytes = remoteIpAddress.GetAddressBytes();
@@ -132,13 +138,17 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// <returns>如果IP在列表中返回true，否则返回false</returns>
     public Boolean IsInIpList(String ipList)
     {
-        var remoteIpAddress = request.HttpContext.Connection.RemoteIpAddress;
-        if (remoteIpAddress == null || String.IsNullOrWhiteSpace(ipList))
+        // 使用 RemoteIp（DHWeb.GetUserHost）获取真实客户端 IP
+        var remoteIpStr = RemoteIp;
+        if (String.IsNullOrWhiteSpace(remoteIpStr) || String.IsNullOrWhiteSpace(ipList))
             return false;
 
-        var remoteIpStr = RemoteIp;
-        if (String.IsNullOrWhiteSpace(remoteIpStr))
+        // 尝试解析为 IPAddress 对象（用于 CIDR 子网检查）
+        IPAddress? remoteIpAddress = null;
+        if (!IPAddress.TryParse(remoteIpStr, out remoteIpAddress))
+        {
             return false;
+        }
 
         // 尝试从缓存获取解析后的规则
         var cacheKey = $"IPList:{ipList}";
