@@ -3,6 +3,8 @@
 using NewLife.Caching;
 using NewLife.Log;
 
+using Pek.Configs;
+
 namespace Pek.WAF;
 
 public class WAFMiddleware {
@@ -30,6 +32,7 @@ public class WAFMiddleware {
         lock (ruleLock)
         {
             compiledRule = new MRE().CompileRule<WebRequest>(rule);
+            XTrace.Log.Info($"[WAFMiddleware.UpdateCompiledRule]:规则已更新 - {rule}");
         }
     }
 
@@ -37,9 +40,18 @@ public class WAFMiddleware {
     {
         var wr = new WebRequest(context.Request, cacheProvider);
 
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
+        
+        if (allowDetailLog)
+        {
+            XTrace.Log.Debug($"[WAFMiddleware.Invoke]:评估请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}");
+        }
+
         if (compiledRule(wr))
         {
-            XTrace.Log.Warn($"[WAFMiddleware.Invoke]:Forbidden request from {wr.RemoteIp}");
+            // Warn 级别：记录被拦截的请求详情
+            XTrace.Log.Warn($"[WAFMiddleware.Invoke]:拦截请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}, UserAgent:{wr.UserAgent}");
 
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;

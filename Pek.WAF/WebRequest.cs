@@ -5,6 +5,10 @@ using Microsoft.Net.Http.Headers;
 
 using NewLife.Caching;
 
+using Pek.Configs;
+using Pek.Helpers;
+using Pek.Webs;
+
 #if NET8_0_OR_GREATER
 using IPNetwork = System.Net.IPNetwork;
 #endif
@@ -25,7 +29,10 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public String? UserAgent => request.HttpContext.Request.Headers.UserAgent.ToString();
 
-    public String? RemoteIp => _remoteIpCache ??= request.HttpContext.Connection.RemoteIpAddress?.ToString();
+    /// <summary>
+    /// 获取远程 IP 地址（通过 DHWeb.GetUserHost 获取真实客户端 IP，自动支持代理转发）
+    /// </summary>
+    public String? RemoteIp => _remoteIpCache ??= DHWeb.GetUserHost(request.HttpContext);
 
     public Boolean Authenticated => request.HttpContext.User.Identity?.IsAuthenticated == true;
 
@@ -51,17 +58,18 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public Boolean InSubnet(String ip, Int32 mask)
     {
-#if NET8_0_OR_GREATER
-        var network = new IPNetwork(IPAddress.Parse(ip), mask);
-        return network.Contains(request.HttpContext.Connection.RemoteIpAddress!);
-#elif NET6_0 || NET7_0
-        var ipAddress = IPAddress.Parse(ip);
-        var remoteIpAddress = request.HttpContext.Connection.RemoteIpAddress;
-
-        if (remoteIpAddress == null)
+        // 使用 RemoteIp（DHWeb.GetUserHost）获取真实客户端 IP
+        var remoteIpStr = RemoteIp;
+        if (String.IsNullOrWhiteSpace(remoteIpStr) || !IPAddress.TryParse(remoteIpStr, out var remoteIpAddress))
         {
             return false;
         }
+
+#if NET8_0_OR_GREATER
+        var network = new IPNetwork(IPAddress.Parse(ip), mask);
+        var result = network.Contains(remoteIpAddress);
+#elif NET6_0 || NET7_0
+        var ipAddress = IPAddress.Parse(ip);
 
         var ipBytes = ipAddress.GetAddressBytes();
         var remoteIpBytes = remoteIpAddress.GetAddressBytes();
@@ -72,16 +80,24 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             Array.Reverse(maskBytes);
         }
 
+        var result = true;
         for (var i = 0; i < ipBytes.Length; i++)
         {
             if ((ipBytes[i] & maskBytes[i]) != (remoteIpBytes[i] & maskBytes[i]))
             {
-                return false;
+                result = false;
+                break;
             }
         }
-
-        return true;
 #endif
+        
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        {
+            NewLife.Log.XTrace.Log.Debug($"[WebRequest.InSubnet]:子网检查 - RemoteIP:{RemoteIp}, 网络:{ip}/{mask}, 匹配:{result}");
+        }
+        
+        return result;
     }
 
     public Boolean IpInFile(String path)
@@ -92,10 +108,24 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         if (data == null && File.Exists(path))
         {
             data = File.ReadAllLines(path);
-            cacheProvider.Cache.Set<IEnumerable<String>>(keyname, File.ReadAllLines(path), 15 * 60);
+            cacheProvider.Cache.Set<IEnumerable<String>>(keyname, data, 15 * 60);
+            
+            // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+            if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+            {
+                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:加载IP文件 - 文件:{path}, IP数量:{data.Count()}");
+            }
         }
 
-        return data?.Contains(RemoteIp, StringComparer.OrdinalIgnoreCase) ?? false;
+        var result = data?.Contains(RemoteIp, StringComparer.OrdinalIgnoreCase) ?? false;
+        
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        {
+            NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:IP文件检查 - RemoteIP:{RemoteIp}, 文件:{path}, 匹配:{result}");
+        }
+        
+        return result;
     }
 
     /// <summary>检查当前请求的远程IP是否在指定的IP列表中</summary>
@@ -108,42 +138,68 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// <returns>如果IP在列表中返回true，否则返回false</returns>
     public Boolean IsInIpList(String ipList)
     {
-        var remoteIpAddress = request.HttpContext.Connection.RemoteIpAddress;
-        if (remoteIpAddress == null || String.IsNullOrWhiteSpace(ipList))
+        // 使用 RemoteIp（DHWeb.GetUserHost）获取真实客户端 IP
+        var remoteIpStr = RemoteIp;
+        if (String.IsNullOrWhiteSpace(remoteIpStr) || String.IsNullOrWhiteSpace(ipList))
             return false;
 
-        var remoteIpStr = RemoteIp;
-        if (String.IsNullOrWhiteSpace(remoteIpStr))
+        // 尝试解析为 IPAddress 对象（用于 CIDR 子网检查）
+        IPAddress? remoteIpAddress = null;
+        if (!IPAddress.TryParse(remoteIpStr, out remoteIpAddress))
+        {
             return false;
+        }
 
         // 尝试从缓存获取解析后的规则
         var cacheKey = $"IPList:{ipList}";
         var parsedRules = cacheProvider.Cache.Get<ParsedIpRule[]>(cacheKey);
         
+        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
+        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
+        
         if (parsedRules == null)
         {
             parsedRules = ParseIpList(ipList);
             cacheProvider.Cache.Set(cacheKey, parsedRules, 300); // 缓存5分钟
+            
+            if (allowDetailLog)
+            {
+                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - 规则数量:{parsedRules.Length}, 原始列表:{ipList}");
+            }
         }
 
         // 快速匹配
         foreach (var rule in parsedRules)
         {
+            var matched = false;
+            
             if (rule.Type == IpRuleType.Exact)
             {
-                if (String.Equals(remoteIpStr, rule.Value, StringComparison.Ordinal))
-                    return true;
+                matched = String.Equals(remoteIpStr, rule.Value, StringComparison.Ordinal);
             }
             else if (rule.Type == IpRuleType.Cidr)
             {
-                if (rule.Mask.HasValue && IsInSubnetFast(remoteIpAddress, rule.ParsedIp!, rule.Mask.Value))
-                    return true;
+                if (rule.Mask.HasValue)
+                    matched = IsInSubnetFast(remoteIpAddress, rule.ParsedIp!, rule.Mask.Value);
             }
             else if (rule.Type == IpRuleType.Wildcard)
             {
-                if (MatchWildcardIpFast(remoteIpStr, rule.Value!))
-                    return true;
+                matched = MatchWildcardIpFast(remoteIpStr, rule.Value!);
             }
+            
+            if (matched)
+            {
+                if (allowDetailLog)
+                {
+                    NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP匹配成功 - RemoteIP:{remoteIpStr}, 规则类型:{rule.Type}, 规则值:{rule.Value}");
+                }
+                return true;
+            }
+        }
+
+        if (allowDetailLog)
+        {
+            NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP不在列表 - RemoteIP:{remoteIpStr}, 已检查规则数:{parsedRules.Length}");
         }
 
         return false;
