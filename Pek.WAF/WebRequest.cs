@@ -23,7 +23,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public String? Referer => request.Headers[HeaderNames.Referer].ToString();
 
-    public String? UserAgent => request.Headers[HeaderNames.UserAgent].ToString();
+    public String? UserAgent => request.HttpContext.Request.Headers.UserAgent.ToString();
 
     public String? RemoteIp => _remoteIpCache ??= request.HttpContext.Connection.RemoteIpAddress?.ToString();
 
@@ -153,6 +153,108 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// <param name="ipList">IP列表字符串，格式同IsInIpList</param>
     /// <returns>如果IP不在列表中返回true，否则返回false</returns>
     public Boolean IsNotInIpList(String ipList) => !IsInIpList(ipList);
+
+    /// <summary>检查当前请求的UserAgent是否包含指定列表中的任意关键字</summary>
+    /// <param name="keywords">关键字列表，多个关键字用逗号或分号分隔，如: "bot, spider, crawler"</param>
+    /// <returns>如果包含任意关键字返回true，否则返回false</returns>
+    public Boolean ContainsUserAgent(String keywords)
+    {
+        var userAgent = UserAgent;
+        if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(keywords))
+            return false;
+
+        // 缓存关键字数组，避免重复分割
+        var cacheKey = $"UAKeywords:{keywords}";
+        var keywordArray = cacheProvider.Cache.Get<String[]>(cacheKey);
+        
+        if (keywordArray == null)
+        {
+            keywordArray = keywords.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            cacheProvider.Cache.Set(cacheKey, keywordArray, 300); // 缓存5分钟
+        }
+
+        foreach (var keyword in keywordArray)
+        {
+            if (!String.IsNullOrEmpty(keyword) && userAgent.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>检查当前请求的UserAgent是否不包含指定列表中的任意关键字（白名单模式）</summary>
+    /// <param name="keywords">关键字列表，多个关键字用逗号或分号分隔</param>
+    /// <returns>如果不包含任何关键字返回true，否则返回false</returns>
+    public Boolean NotContainsUserAgent(String keywords) => !ContainsUserAgent(keywords);
+
+    /// <summary>检查当前请求的UserAgent是否在指定的UserAgent列表中（精确匹配）</summary>
+    /// <param name="userAgentList">UserAgent列表，多个值用逗号或分号分隔</param>
+    /// <returns>如果在列表中返回true，否则返回false</returns>
+    public Boolean IsInUserAgentList(String userAgentList)
+    {
+        var userAgent = UserAgent;
+        if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(userAgentList))
+            return false;
+
+        // 缓存UserAgent数组，避免重复分割
+        var cacheKey = $"UAList:{userAgentList}";
+        var agents = cacheProvider.Cache.Get<String[]>(cacheKey);
+        
+        if (agents == null)
+        {
+            agents = userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            cacheProvider.Cache.Set(cacheKey, agents, 300); // 缓存5分钟
+        }
+
+        foreach (var agent in agents)
+        {
+            if (!String.IsNullOrEmpty(agent) && String.Equals(userAgent, agent, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>检查当前请求的UserAgent是否不在指定的UserAgent列表中（白名单模式）</summary>
+    /// <param name="userAgentList">UserAgent列表，多个值用逗号或分号分隔</param>
+    /// <returns>如果不在列表中返回true，否则返回false</returns>
+    public Boolean IsNotInUserAgentList(String userAgentList) => !IsInUserAgentList(userAgentList);
+
+    /// <summary>检查当前请求的UserAgent是否以指定的任意前缀开头</summary>
+    /// <param name="prefixes">前缀列表，多个前缀用逗号或分号分隔</param>
+    /// <returns>如果以任意前缀开头返回true，否则返回false</returns>
+    public Boolean UserAgentStartsWith(String prefixes)
+    {
+        var userAgent = UserAgent;
+        if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(prefixes))
+            return false;
+
+        // 缓存前缀数组
+        var cacheKey = $"UAPrefixes:{prefixes}";
+        var prefixArray = cacheProvider.Cache.Get<String[]>(cacheKey);
+        
+        if (prefixArray == null)
+        {
+            prefixArray = prefixes.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            cacheProvider.Cache.Set(cacheKey, prefixArray, 300); // 缓存5分钟
+        }
+
+        foreach (var prefix in prefixArray)
+        {
+            if (!String.IsNullOrEmpty(prefix) && userAgent.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>检查当前请求的UserAgent是否为空或未提供</summary>
+    /// <returns>如果为空返回true，否则返回false</returns>
+    public Boolean UserAgentIsEmpty() => String.IsNullOrWhiteSpace(UserAgent);
+
+    /// <summary>检查当前请求的UserAgent是否不为空</summary>
+    /// <returns>如果不为空返回true，否则返回false</returns>
+    public Boolean UserAgentIsNotEmpty() => !String.IsNullOrWhiteSpace(UserAgent);
 
     private static ParsedIpRule[] ParseIpList(String ipList)
     {
