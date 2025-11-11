@@ -27,7 +27,10 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public String? Referer => request.Headers[HeaderNames.Referer].ToString();
 
-    public String? UserAgent => request.HttpContext.Request.Headers.UserAgent.ToString();
+    /// <summary>
+    /// 获取 User-Agent（通过 DHWeb.UserAgent 统一获取）
+    /// </summary>
+    public String? UserAgent => DHWeb.UserAgent;
 
     /// <summary>
     /// 获取远程 IP 地址（通过 DHWeb.GetUserHost 获取真实客户端 IP，自动支持代理转发）
