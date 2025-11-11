@@ -154,9 +154,38 @@ List<User> users = [];
 - 仅删除或合并空白行以制造“变化”
 - 删除已有 `for/foreach/while/do` 单行循环体的花括号
 
-## 14. 术语说明
+## 14. Web请求相关API使用规范
+
+### 14.1 IP地址获取
+- **用户真实IP**：`DHWeb.GetUserHost(HttpContext context)` - 处理代理转发、X-Forwarded-For等场景
+- **客户端IP**：`DHWeb.IP` - 包含局域网处理逻辑，用于本地/内网识别
+- 禁止直接使用 `HttpContext.Connection.RemoteIpAddress`，应通过上述统一接口
+
+### 14.2 UserAgent获取
+- **统一接口**：`DHWeb.UserAgent` - 带请求级缓存，避免重复解析Headers
+- **扩展方法**：`request.UserAgent()` - 已重定向到 `DHWeb.UserAgent`
+- 禁止直接使用 `request.Headers.UserAgent` 或 `request.Headers["User-Agent"]`
+
+### 14.3 性能优化说明
+- `DHWeb.UserAgent` 使用 `HttpContext.Items` 实现请求级缓存
+- `DHWeb.GetUserHost` 同样实现请求级缓存
+- 在多中间件场景下，第2-N次访问仅需字典查找，显著提升性能
+
+### 14.4 使用示例
+```csharp
+// ✅ 正确方式
+var ip = DHWeb.GetUserHost(context);
+var userAgent = DHWeb.UserAgent;
+
+// ❌ 错误方式
+var ip = context.Connection.RemoteIpAddress?.ToString();
+var userAgent = context.Request.Headers.UserAgent;
+```
+
+## 15. 术语说明
 - 热点路径：经性能分析或高频调用栈确认的关键执行段。
 - 基线：变更前的功能/性能参考数据。
+- 请求级缓存：在单个HTTP请求生命周期内的缓存，请求结束后自动清理。
 
 ---
 （完）
