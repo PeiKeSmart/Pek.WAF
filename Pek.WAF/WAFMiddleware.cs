@@ -48,11 +48,8 @@ public class WAFMiddleware {
     {
         var wr = new WebRequest(context.Request, cacheProvider);
 
-        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
-        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
-        
-        // IP请求频率统计（轻量级计数器）
-        if (!String.IsNullOrWhiteSpace(wr.RemoteIp))
+        // IP请求频率监控（由配置项控制）
+        if (PekSysSetting.Current.EnableIpRateMonitor && !String.IsNullOrWhiteSpace(wr.RemoteIp))
         {
             var ipKey = $"WAF:ReqCount:{wr.RemoteIp}";
             var count = cacheProvider.Cache.Increment(ipKey, 1);
@@ -63,16 +60,7 @@ public class WAFMiddleware {
                 cacheProvider.Cache.SetExpire(ipKey, TimeSpan.FromMinutes(IpWindowMinutes));
             }
             
-            // 超过阈值时记录告警日志
-            if (count >= IpRequestThreshold)
-            {
-                XTrace.Log.Warn($"[WAF]:高频IP检测 - IP:{wr.RemoteIp}, {IpWindowMinutes}分钟内请求:{count}次, Path:{wr.Path}, Method:{wr.Method}");
-            }
-        }
-        
-        if (allowDetailLog)
-        {
-            XTrace.Log.Debug($"[WAFMiddleware.Invoke]:评估请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}");
+            XTrace.Log.Info($"[WAF]:IP请求监控 - IP:{wr.RemoteIp}, {IpWindowMinutes}分钟内请求:{count}次, Path:{wr.Path}, Method:{wr.Method}");
         }
 
         if (compiledRule(wr))
