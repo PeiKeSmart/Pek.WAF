@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Sockets;
 
 using NewLife.Log;
@@ -10,6 +11,11 @@ namespace Pek.WAF.Extensions;
 /// <summary>String类型的IP相关扩展方法，用于WAF规则引擎</summary>
 public static class StringIpExtensions
 {
+    #region 静态缓存
+    /// <summary>IP规则解析结果缓存，避免重复解析（规则配置数量有限，无需容量限制）</summary>
+    private static readonly ConcurrentDictionary<String, ParsedIpRule[]> _ipRuleCache = new(StringComparer.Ordinal);
+    #endregion
+
     /// <summary>检查IP字符串是否在指定的IP列表中</summary>
     /// <param name="remoteIp">要检查的IP地址字符串</param>
     /// <param name="ipList">IP列表字符串，支持多种格式：
@@ -52,56 +58,47 @@ public static class StringIpExtensions
             XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:IP解析成功 - RemoteIP:'{remoteIp}', AddressFamily:{remoteIpAddress.AddressFamily}");
         }
 
-        var ipEntries = ipList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        // 使用缓存获取解析后的规则
+        var parsedRules = GetOrAddIpRuleCache(ipList);
 
         if (allowDetailLog)
         {
-            XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:分割IP列表 - 规则数量:{ipEntries.Length}");
+            XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:获取IP规则 - 规则数量:{parsedRules.Length}");
         }
 
-        foreach (var entry in ipEntries)
+        foreach (var rule in parsedRules)
         {
-            if (String.IsNullOrEmpty(entry))
-                continue;
-
-            // CIDR 格式
-            var slashIdx = entry.IndexOf('/');
-            if (slashIdx > 0 && slashIdx < entry.Length - 1)
+            var matched = false;
+            
+            if (rule.Type == IpRuleType.Exact)
             {
-                if (Int32.TryParse(entry.AsSpan(slashIdx + 1), out var mask) && 
-                    IPAddress.TryParse(entry.AsSpan(0, slashIdx), out var networkIp))
-                {
-                    var matched = IsInSubnet(remoteIpAddress, networkIp, mask);
-                    if (allowDetailLog)
-                    {
-                        XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:CIDR检查 - RemoteIP:'{remoteIp}', 规则:'{entry}', 匹配:{matched}");
-                    }
-                    if (matched)
-                        return true;
-                }
-                continue;
-            }
-
-            // 通配符格式
-            if (entry.IndexOf('*') >= 0)
-            {
-                var matched = MatchWildcardIp(remoteIp.AsSpan(), entry.AsSpan());
+                matched = String.Equals(remoteIp, rule.Value, StringComparison.Ordinal);
                 if (allowDetailLog)
                 {
-                    XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:通配符检查 - RemoteIP:'{remoteIp}', 规则:'{entry}', 匹配:{matched}");
+                    XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:精确匹配 - RemoteIP:'{remoteIp}', 规则:'{rule.Value}', 匹配:{matched}");
                 }
-                if (matched)
-                    return true;
-                continue;
             }
-
-            // 精确匹配
-            var exactMatch = String.Equals(remoteIp, entry, StringComparison.Ordinal);
-            if (allowDetailLog)
+            else if (rule.Type == IpRuleType.Cidr)
             {
-                XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:精确匹配 - RemoteIP:'{remoteIp}', 规则:'{entry}', 匹配:{exactMatch}");
+                if (rule.Mask.HasValue && rule.ParsedIp != null)
+                {
+                    matched = IsInSubnet(remoteIpAddress, rule.ParsedIp, rule.Mask.Value);
+                }
+                if (allowDetailLog)
+                {
+                    XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:CIDR检查 - RemoteIP:'{remoteIp}', 规则:'{rule.Value}', 匹配:{matched}");
+                }
             }
-            if (exactMatch)
+            else if (rule.Type == IpRuleType.Wildcard)
+            {
+                matched = MatchWildcardIp(remoteIp.AsSpan(), rule.Value.AsSpan());
+                if (allowDetailLog)
+                {
+                    XTrace.Log.Debug($"[StringIpExtensions.IsInIpList]:通配符检查 - RemoteIP:'{remoteIp}', 规则:'{rule.Value}', 匹配:{matched}");
+                }
+            }
+            
+            if (matched)
                 return true;
         }
 
@@ -118,6 +115,49 @@ public static class StringIpExtensions
     /// <param name="ipList">IP列表字符串，格式同IsInIpList</param>
     /// <returns>如果IP不在列表中返回true，否则返回false</returns>
     public static Boolean IsNotInIpList(this String? remoteIp, String ipList) => !IsInIpList(remoteIp, ipList);
+
+    #region 缓存辅助方法
+    /// <summary>获取或添加IP规则缓存</summary>
+    private static ParsedIpRule[] GetOrAddIpRuleCache(String ipList) =>
+        _ipRuleCache.GetOrAdd(ipList, ParseIpList);
+    
+    /// <summary>解析IP列表字符串为规则数组</summary>
+    private static ParsedIpRule[] ParseIpList(String ipList)
+    {
+        var entries = ipList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var rules = new List<ParsedIpRule>(entries.Length);
+
+        foreach (var entry in entries)
+        {
+            if (String.IsNullOrEmpty(entry))
+                continue;
+
+            // CIDR 格式
+            var slashIdx = entry.IndexOf('/');
+            if (slashIdx > 0 && slashIdx < entry.Length - 1)
+            {
+                if (Int32.TryParse(entry.AsSpan(slashIdx + 1), out var mask) && 
+                    IPAddress.TryParse(entry.AsSpan(0, slashIdx), out var ip))
+                {
+                    rules.Add(new ParsedIpRule(IpRuleType.Cidr, entry, ip, mask));
+                    continue;
+                }
+            }
+
+            // 通配符格式
+            if (entry.IndexOf('*') >= 0)
+            {
+                rules.Add(new ParsedIpRule(IpRuleType.Wildcard, entry, null, null));
+                continue;
+            }
+
+            // 精确匹配
+            rules.Add(new ParsedIpRule(IpRuleType.Exact, entry, null, null));
+        }
+
+        return [.. rules];
+    }
+    #endregion
 
     private static Boolean IsInSubnet(IPAddress remoteIp, IPAddress networkIp, Int32 mask)
     {
@@ -212,4 +252,15 @@ public static class StringIpExtensions
 
         return ipSegments == 4 && patternSegments == 4;
     }
+
+    #region 内部类型
+    private enum IpRuleType : Byte
+    {
+        Exact,
+        Cidr,
+        Wildcard
+    }
+
+    private readonly record struct ParsedIpRule(IpRuleType Type, String Value, IPAddress? ParsedIp, Int32? Mask);
+    #endregion
 }

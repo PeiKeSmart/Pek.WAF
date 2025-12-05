@@ -16,54 +16,62 @@ public class WAFMiddleware {
     private const Int32 IpWindowMinutes = 5;
     #endregion
 
-    private readonly RequestDelegate next;
-    private Func<WebRequest, Boolean> compiledRule = default!;
-    private readonly ICacheProvider cacheProvider;
-    private readonly Object ruleLock = new();
+    private readonly RequestDelegate _next;
+    private readonly ICacheProvider _cacheProvider;
+
+    /// <summary>编译后的规则委托，使用 volatile 保证可见性，配合 Interlocked.Exchange 实现无锁更新</summary>
+    private volatile Func<WebRequest, Boolean> _compiledRule = default!;
 
     public WAFMiddleware(RequestDelegate next,
         ICacheProvider cache,
         IOptionsMonitor<Rule> ruleset)
     {
-        this.next = next;
-        cacheProvider = cache;
+        _next = next;
+        _cacheProvider = cache;
 
         UpdateCompiledRule(ruleset.CurrentValue);
 
         ruleset.OnChange(r => UpdateCompiledRule(r));
     }
 
-
     private void UpdateCompiledRule(Rule rule)
     {
-        // 更新逻辑
-        lock (ruleLock)
-        {
-            compiledRule = new MRE().CompileRule<WebRequest>(rule);
-            XTrace.Log.Info($"[WAFMiddleware.UpdateCompiledRule]:规则已更新 - {rule}");
-        }
+        // 先编译新规则（在锁外完成耗时操作）
+        var newCompiledRule = new MRE().CompileRule<WebRequest>(rule);
+        
+        // 原子替换：无锁更新，读取时无需任何同步开销
+        Interlocked.Exchange(ref _compiledRule, newCompiledRule);
+        
+        XTrace.Log.Info($"[WAFMiddleware.UpdateCompiledRule]:规则已更新 - {rule}");
     }
 
     public async Task Invoke(HttpContext context)
     {
-        var wr = new WebRequest(context.Request, cacheProvider);
+        var wr = new WebRequest(context.Request, _cacheProvider);
 
         // IP请求频率监控（由配置项控制）
         if (PekSysSetting.Current.EnableIpRateMonitor && !String.IsNullOrWhiteSpace(wr.RemoteIp))
         {
             var ipKey = $"WAF:ReqCount:{wr.RemoteIp}";
-            var count = cacheProvider.Cache.Increment(ipKey, 1);
             
-            // 首次计数时设置过期时间
-            if (count == 1)
+            // 使用 Add 原子操作：仅当 key 不存在时初始化为 0 并设置过期时间
+            // Add 返回 true 表示 key 不存在并成功添加，false 表示 key 已存在
+            // 这样无论多少并发请求同时到达，只有一个会成功初始化
+            _cacheProvider.Cache.Add(ipKey, 0, IpWindowMinutes * 60);
+            
+            // Increment 原子递增，无论 Add 是否成功都执行
+            var count = _cacheProvider.Cache.Increment(ipKey, 1);
+            
+            // 仅在调试模式时输出详细日志，避免高并发下的日志性能开销
+            if (XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
             {
-                cacheProvider.Cache.SetExpire(ipKey, TimeSpan.FromMinutes(IpWindowMinutes));
+                XTrace.Log.Debug($"[WAF]:IP请求监控 - IP:{wr.RemoteIp}, {IpWindowMinutes}分钟内请求:{count}次, Path:{wr.Path}, Method:{wr.Method}");
             }
-            
-            XTrace.Log.Info($"[WAF]:IP请求监控 - IP:{wr.RemoteIp}, {IpWindowMinutes}分钟内请求:{count}次, Path:{wr.Path}, Method:{wr.Method}");
         }
 
-        if (compiledRule(wr))
+        // 读取 volatile 字段：无锁，性能最优
+        var rule = _compiledRule;
+        if (rule(wr))
         {
             // Warn 级别:记录被拦截的请求详情
             XTrace.Log.Warn($"[WAFMiddleware.Invoke]:拦截请求 - IP:{wr.RemoteIp}, Path:{wr.Path}, Method:{wr.Method}, UserAgent:{wr.UserAgent}");
@@ -72,6 +80,6 @@ public class WAFMiddleware {
             return;
         }
 
-        await next.Invoke(context).ConfigureAwait(false);
+        await _next.Invoke(context).ConfigureAwait(false);
     }
 }

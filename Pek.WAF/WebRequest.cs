@@ -107,20 +107,24 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     {
         var keyname = System.IO.Path.GetFileNameWithoutExtension(path);
 
-        var data = cacheProvider.Cache.Get<IEnumerable<String>>(keyname);
-        if (data == null && File.Exists(path))
+        // 使用 GetOrAdd 确保并发首次请求时只有一个线程读取文件
+        var data = cacheProvider.Cache.GetOrAdd<String[]>(keyname, k =>
         {
-            data = File.ReadAllLines(path);
-            cacheProvider.Cache.Set<IEnumerable<String>>(keyname, data, 15 * 60);
+            if (!File.Exists(path))
+                return [];
+                
+            var lines = File.ReadAllLines(path);
             
             // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
             if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
             {
-                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:加载IP文件 - 文件:{path}, IP数量:{data.Count()}");
+                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:加载IP文件 - 文件:{path}, IP数量:{lines.Length}");
             }
-        }
+            
+            return lines;
+        }, 15 * 60);
 
-        var result = data?.Contains(RemoteIp, StringComparer.OrdinalIgnoreCase) ?? false;
+        var result = data.Length > 0 && data.Contains(RemoteIp, StringComparer.OrdinalIgnoreCase);
         
         // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
         if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
@@ -153,23 +157,22 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             return false;
         }
 
-        // 尝试从缓存获取解析后的规则
-        var cacheKey = $"IPList:{ipList}";
-        var parsedRules = cacheProvider.Cache.Get<ParsedIpRule[]>(cacheKey);
-        
         // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
         var allowDetailLog = PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
         
-        if (parsedRules == null)
+        // 使用 GetOrAdd 确保并发首次请求时只有一个线程解析规则
+        var cacheKey = $"IPList:{ipList}";
+        var parsedRules = cacheProvider.Cache.GetOrAdd(cacheKey, k =>
         {
-            parsedRules = ParseIpList(ipList);
-            cacheProvider.Cache.Set(cacheKey, parsedRules, 300); // 缓存5分钟
+            var rules = ParseIpList(ipList);
             
             if (allowDetailLog)
             {
-                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - 规则数量:{parsedRules.Length}, 原始列表:{ipList}");
+                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - 规则数量:{rules.Length}, 原始列表:{ipList}");
             }
-        }
+            
+            return rules;
+        }, 300); // 缓存5分钟
 
         // 快速匹配
         foreach (var rule in parsedRules)
@@ -222,15 +225,11 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(keywords))
             return false;
 
-        // 缓存关键字数组，避免重复分割
+        // 使用 GetOrAdd 确保并发首次请求时只有一个线程分割字符串
         var cacheKey = $"UAKeywords:{keywords}";
-        var keywordArray = cacheProvider.Cache.Get<String[]>(cacheKey);
-        
-        if (keywordArray == null)
-        {
-            keywordArray = keywords.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            cacheProvider.Cache.Set(cacheKey, keywordArray, 300); // 缓存5分钟
-        }
+        var keywordArray = cacheProvider.Cache.GetOrAdd(cacheKey, 
+            k => keywords.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
+            300); // 缓存5分钟
 
         foreach (var keyword in keywordArray)
         {
@@ -255,15 +254,11 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(userAgentList))
             return false;
 
-        // 缓存UserAgent数组，避免重复分割
+        // 使用 GetOrAdd 确保并发首次请求时只有一个线程分割字符串
         var cacheKey = $"UAList:{userAgentList}";
-        var agents = cacheProvider.Cache.Get<String[]>(cacheKey);
-        
-        if (agents == null)
-        {
-            agents = userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            cacheProvider.Cache.Set(cacheKey, agents, 300); // 缓存5分钟
-        }
+        var agents = cacheProvider.Cache.GetOrAdd(cacheKey, 
+            k => userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
+            300); // 缓存5分钟
 
         foreach (var agent in agents)
         {
@@ -288,15 +283,11 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(prefixes))
             return false;
 
-        // 缓存前缀数组
+        // 使用 GetOrAdd 确保并发首次请求时只有一个线程分割字符串
         var cacheKey = $"UAPrefixes:{prefixes}";
-        var prefixArray = cacheProvider.Cache.Get<String[]>(cacheKey);
-        
-        if (prefixArray == null)
-        {
-            prefixArray = prefixes.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            cacheProvider.Cache.Set(cacheKey, prefixArray, 300); // 缓存5分钟
-        }
+        var prefixArray = cacheProvider.Cache.GetOrAdd(cacheKey, 
+            k => prefixes.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
+            300); // 缓存5分钟
 
         foreach (var prefix in prefixArray)
         {
