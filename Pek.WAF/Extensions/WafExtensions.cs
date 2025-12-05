@@ -121,7 +121,22 @@ public static class WafExtensions
             if (targetPath == null) return newRuleId;
             
             var jsonContent = File.ReadAllText(targetPath);
-            var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(jsonContent);
+            
+            // 允许 JSON 中包含注释和尾随逗号
+            var parseOptions = new System.Text.Json.JsonDocumentOptions
+            {
+                CommentHandling = System.Text.Json.JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            };
+            var nodeOptions = new System.Text.Json.Nodes.JsonNodeOptions
+            {
+                PropertyNameCaseInsensitive = true
+            };
+            var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(jsonContent, nodeOptions, new System.Text.Json.JsonDocumentOptions
+            {
+                CommentHandling = System.Text.Json.JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            });
             
             if (jsonNode is not System.Text.Json.Nodes.JsonObject rootObj) return newRuleId;
             
@@ -143,15 +158,34 @@ public static class WafExtensions
             
             // 递归处理所有叶子规则的 RuleId，收集已使用的 ID 并检测重复
             var usedIds = new HashSet<String>(StringComparer.OrdinalIgnoreCase);
-            var modified = EnsureRuleIdsRecursive(rulesetObj, usedIds);
+            var missingRuleIds = new List<String>();
+            var duplicateRuleIds = new List<String>();
+            var modified = EnsureRuleIdsRecursive(rulesetObj, usedIds, missingRuleIds, duplicateRuleIds);
             
-            // 如果有修改，保存文件
+            // 如果有修改，提示用户（避免自动写回丢失注释）
             if (modified)
             {
-                var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
-                var updatedJson = jsonNode.ToJsonString(jsonOptions);
-                File.WriteAllText(targetPath, updatedJson);
-                Console.WriteLine($"[WAF]:已自动补全/修复配置文件中的 RuleId - 文件:{targetPath}");
+                // 检查原始文件是否包含注释
+                var hasComments = jsonContent.Contains("//") || jsonContent.Contains("/*");
+                
+                if (hasComments)
+                {
+                    // 文件包含注释，只输出警告，不自动写回
+                    Console.WriteLine($"[WAF]:检测到配置文件包含注释，为避免丢失注释，请手动补全以下 RuleId:");
+                    if (missingRuleIds.Count > 0)
+                        Console.WriteLine($"  - 缺失 RuleId 的规则位置: {String.Join(", ", missingRuleIds)}");
+                    if (duplicateRuleIds.Count > 0)
+                        Console.WriteLine($"  - 重复的 RuleId: {String.Join(", ", duplicateRuleIds)}");
+                    Console.WriteLine($"  - 配置文件路径: {targetPath}");
+                }
+                else
+                {
+                    // 无注释，安全写回
+                    var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+                    var updatedJson = jsonNode.ToJsonString(jsonOptions);
+                    File.WriteAllText(targetPath, updatedJson);
+                    Console.WriteLine($"[WAF]:已自动补全/修复配置文件中的 RuleId - 文件:{targetPath}");
+                }
             }
             
             return newRuleId;
@@ -165,8 +199,16 @@ public static class WafExtensions
     }
     
     /// <summary>递归处理规则对象，确保所有叶子规则都有唯一的 RuleId</summary>
+    /// <param name="ruleObj">规则 JSON 对象</param>
+    /// <param name="usedIds">已使用的 RuleId 集合</param>
+    /// <param name="missingRuleIds">缺失 RuleId 的规则描述列表</param>
+    /// <param name="duplicateRuleIds">重复的 RuleId 列表</param>
     /// <returns>是否有修改</returns>
-    private static Boolean EnsureRuleIdsRecursive(System.Text.Json.Nodes.JsonObject ruleObj, HashSet<String> usedIds)
+    private static Boolean EnsureRuleIdsRecursive(
+        System.Text.Json.Nodes.JsonObject ruleObj, 
+        HashSet<String> usedIds,
+        List<String> missingRuleIds,
+        List<String> duplicateRuleIds)
     {
         var modified = false;
         
@@ -199,8 +241,13 @@ public static class WafExtensions
                 ruleIdKey = "RuleId";
             }
             
+            // 获取规则描述信息
+            var memberName = ruleObj["memberName"]?.GetValue<String>() ?? ruleObj["MemberName"]?.GetValue<String>() ?? "unknown";
+            var operatorName = ruleObj["operator"]?.GetValue<String>() ?? ruleObj["Operator"]?.GetValue<String>() ?? "unknown";
+            var ruleDesc = $"{memberName}.{operatorName}";
+            
             // 如果 RuleId 为空或重复，生成新的
-            if (String.IsNullOrWhiteSpace(currentRuleId) || usedIds.Contains(currentRuleId))
+            if (String.IsNullOrWhiteSpace(currentRuleId))
             {
                 var newId = GenerateRuleId();
                 while (usedIds.Contains(newId))
@@ -211,11 +258,20 @@ public static class WafExtensions
                 ruleObj[ruleIdKey] = newId;
                 usedIds.Add(newId);
                 modified = true;
-                
-                if (!String.IsNullOrWhiteSpace(currentRuleId))
+                missingRuleIds.Add(ruleDesc);
+            }
+            else if (usedIds.Contains(currentRuleId))
+            {
+                var newId = GenerateRuleId();
+                while (usedIds.Contains(newId))
                 {
-                    Console.WriteLine($"[WAF]:检测到重复 RuleId '{currentRuleId}'，已自动更新为 '{newId}'");
+                    newId = GenerateRuleId();
                 }
+                
+                ruleObj[ruleIdKey] = newId;
+                usedIds.Add(newId);
+                modified = true;
+                duplicateRuleIds.Add(currentRuleId);
             }
             else
             {
@@ -230,7 +286,7 @@ public static class WafExtensions
             {
                 if (childNode is System.Text.Json.Nodes.JsonObject childObj)
                 {
-                    if (EnsureRuleIdsRecursive(childObj, usedIds))
+                    if (EnsureRuleIdsRecursive(childObj, usedIds, missingRuleIds, duplicateRuleIds))
                     {
                         modified = true;
                     }
