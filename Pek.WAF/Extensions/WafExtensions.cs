@@ -8,7 +8,8 @@ using System.IO;
 using System.Text.Json;
 using System;
 
-public static class WafExtensions {
+public static class WafExtensions
+{
     public static IServiceCollection AddWebFirewall(this IServiceCollection services, IConfiguration configuration)
     {
         var rulesetSection = configuration.GetSection("Ruleset");
@@ -57,6 +58,9 @@ public static class WafExtensions {
         }
         else
         {
+            // 检查并补全叶子规则的 RuleId
+            EnsureRuleIdInConfigFile();
+            
             services.Configure<Rule>(rulesetSection);
         }
 
@@ -72,18 +76,21 @@ public static class WafExtensions {
             {
                 new Rule
                 {
+                    RuleId = GenerateRuleId(),
                     MemberName = "Path",
                     Operator = "EndsWith",
                     Inputs = new List<object> { ".php" }
                 },
                 new Rule
                 {
+                    RuleId = GenerateRuleId(),
                     MemberName = "Path",
                     Operator = "EndsWith",
                     Inputs = new List<object> { ".env" }
                 },
                 new Rule
                 {
+                    RuleId = GenerateRuleId(),
                     MemberName = "Path",
                     Operator = "EndsWith",
                     Inputs = new List<object> { ".git" }
@@ -91,6 +98,151 @@ public static class WafExtensions {
             }
         };
     }
+    
+    /// <summary>检查并补全配置文件中所有规则的 RuleId，检测重复并自动修复，返回根 RuleId 值</summary>
+    private static String EnsureRuleIdInConfigFile()
+    {
+        var newRuleId = GenerateRuleId();
+        
+        try
+        {
+            var possiblePaths = GetPossibleConfigPaths();
+            String? targetPath = null;
+            
+            foreach (var path in possiblePaths)
+            {
+                if (File.Exists(path))
+                {
+                    targetPath = path;
+                    break;
+                }
+            }
+            
+            if (targetPath == null) return newRuleId;
+            
+            var jsonContent = File.ReadAllText(targetPath);
+            var jsonNode = System.Text.Json.Nodes.JsonNode.Parse(jsonContent);
+            
+            if (jsonNode is not System.Text.Json.Nodes.JsonObject rootObj) return newRuleId;
+            
+            System.Text.Json.Nodes.JsonObject? rulesetObj = null;
+            var rulesetKey = "Ruleset";
+            
+            if (rootObj.TryGetPropertyValue("Ruleset", out var rulesetNode))
+            {
+                rulesetObj = rulesetNode as System.Text.Json.Nodes.JsonObject;
+                rulesetKey = "Ruleset";
+            }
+            else if (rootObj.TryGetPropertyValue("ruleset", out rulesetNode))
+            {
+                rulesetObj = rulesetNode as System.Text.Json.Nodes.JsonObject;
+                rulesetKey = "ruleset";
+            }
+            
+            if (rulesetObj == null) return newRuleId;
+            
+            // 递归处理所有叶子规则的 RuleId，收集已使用的 ID 并检测重复
+            var usedIds = new HashSet<String>(StringComparer.OrdinalIgnoreCase);
+            var modified = EnsureRuleIdsRecursive(rulesetObj, usedIds);
+            
+            // 如果有修改，保存文件
+            if (modified)
+            {
+                var jsonOptions = new JsonSerializerOptions { WriteIndented = true };
+                var updatedJson = jsonNode.ToJsonString(jsonOptions);
+                File.WriteAllText(targetPath, updatedJson);
+                Console.WriteLine($"[WAF]:已自动补全/修复配置文件中的 RuleId - 文件:{targetPath}");
+            }
+            
+            return newRuleId;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Warning: Failed to update RuleId in config file: {ex.Message}");
+        }
+        
+        return newRuleId;
+    }
+    
+    /// <summary>递归处理规则对象，确保所有叶子规则都有唯一的 RuleId</summary>
+    /// <returns>是否有修改</returns>
+    private static Boolean EnsureRuleIdsRecursive(System.Text.Json.Nodes.JsonObject ruleObj, HashSet<String> usedIds)
+    {
+        var modified = false;
+        
+        // 检查是否有子规则（组合节点）
+        System.Text.Json.Nodes.JsonArray? rulesArray = null;
+        if (ruleObj.TryGetPropertyValue("rules", out var rulesNode) ||
+            ruleObj.TryGetPropertyValue("Rules", out rulesNode))
+        {
+            rulesArray = rulesNode as System.Text.Json.Nodes.JsonArray;
+        }
+        
+        // 判断是否为叶子节点（有 MemberName 或没有子 Rules 的规则）
+        var hasMemberName = ruleObj.ContainsKey("memberName") || ruleObj.ContainsKey("MemberName");
+        var isLeafRule = hasMemberName || rulesArray == null || rulesArray.Count == 0;
+        
+        // 只有叶子规则需要 RuleId
+        if (isLeafRule && hasMemberName)
+        {
+            String? currentRuleId = null;
+            var ruleIdKey = "ruleId";
+            
+            if (ruleObj.TryGetPropertyValue("ruleId", out var ruleIdNode))
+            {
+                currentRuleId = ruleIdNode?.GetValue<String>();
+                ruleIdKey = "ruleId";
+            }
+            else if (ruleObj.TryGetPropertyValue("RuleId", out ruleIdNode))
+            {
+                currentRuleId = ruleIdNode?.GetValue<String>();
+                ruleIdKey = "RuleId";
+            }
+            
+            // 如果 RuleId 为空或重复，生成新的
+            if (String.IsNullOrWhiteSpace(currentRuleId) || usedIds.Contains(currentRuleId))
+            {
+                var newId = GenerateRuleId();
+                while (usedIds.Contains(newId))
+                {
+                    newId = GenerateRuleId();
+                }
+                
+                ruleObj[ruleIdKey] = newId;
+                usedIds.Add(newId);
+                modified = true;
+                
+                if (!String.IsNullOrWhiteSpace(currentRuleId))
+                {
+                    Console.WriteLine($"[WAF]:检测到重复 RuleId '{currentRuleId}'，已自动更新为 '{newId}'");
+                }
+            }
+            else
+            {
+                usedIds.Add(currentRuleId);
+            }
+        }
+        
+        // 递归处理子规则
+        if (rulesArray != null)
+        {
+            foreach (var childNode in rulesArray)
+            {
+                if (childNode is System.Text.Json.Nodes.JsonObject childObj)
+                {
+                    if (EnsureRuleIdsRecursive(childObj, usedIds))
+                    {
+                        modified = true;
+                    }
+                }
+            }
+        }
+        
+        return modified;
+    }
+    
+    /// <summary>生成 8 位短 GUID 作为 RuleId</summary>
+    private static String GenerateRuleId() => Guid.NewGuid().ToString("N")[..8];
     
     private static void CreateDefaultConfigFile()
     {

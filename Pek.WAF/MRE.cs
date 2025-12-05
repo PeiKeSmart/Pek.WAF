@@ -319,6 +319,7 @@ public class MRE
             var inputs = rule.Inputs?.Select(x => x.GetType()).ToArray() ?? [];
             var methodInfo = propType.GetMethod(rule.Operator, inputs);
             List<Expression> expressions = [];
+            var ruleIdInjected = false; // 标记是否注入了 RuleId
 
             if (methodInfo == null)
             {
@@ -326,11 +327,31 @@ public class MRE
                 if (methodInfo != null)
                 {
                     var parameters = methodInfo.GetParameters();
-                    var i = 0;
-                    foreach (var item in rule.Inputs!)
+                    
+                    // 检查是否需要注入 RuleId：方法参数比 Inputs 多一个，且第一个参数名为 ruleId
+                    if (parameters.Length == (rule.Inputs?.Count ?? 0) + 1 && 
+                        parameters[0].Name?.Equals("ruleId", StringComparison.OrdinalIgnoreCase) == true &&
+                        parameters[0].ParameterType == typeof(String) &&
+                        !String.IsNullOrWhiteSpace(rule.RuleId))
                     {
-                        expressions.Add(MRE.StringToExpression(item, parameters[i].ParameterType));
-                        i++;
+                        // 注入 RuleId
+                        expressions.Add(Expression.Constant(rule.RuleId));
+                        ruleIdInjected = true;
+                        
+                        // 处理剩余参数
+                        for (var i = 0; i < (rule.Inputs?.Count ?? 0); i++)
+                        {
+                            expressions.Add(MRE.StringToExpression(rule.Inputs![i], parameters[i + 1].ParameterType));
+                        }
+                    }
+                    else
+                    {
+                        var i = 0;
+                        foreach (var item in rule.Inputs!)
+                        {
+                            expressions.Add(MRE.StringToExpression(item, parameters[i].ParameterType));
+                            i++;
+                        }
                     }
                 }
                 else
@@ -752,6 +773,9 @@ public class Rule
     public Rule()
     {
     }
+
+    /// <summary>规则唯一标识，用于缓存键组合，缺失时自动生成</summary>
+    [DataMember] public String? RuleId { get; set; }
 
     [DataMember] public String? MemberName { get; set; }
     [DataMember] public String? Operator { get; set; }

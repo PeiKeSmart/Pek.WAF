@@ -4,10 +4,12 @@ using NewLife.Caching;
 using NewLife.Log;
 
 using Pek.Configs;
+using Pek.WAF.Extensions;
 
 namespace Pek.WAF;
 
-public class WAFMiddleware {
+public class WAFMiddleware
+{
     #region 配置常量
     /// <summary>IP请求频率阈值（次数）</summary>
     private const Int32 IpRequestThreshold = 10;
@@ -36,7 +38,10 @@ public class WAFMiddleware {
 
     private void UpdateCompiledRule(Rule rule)
     {
-        // 先编译新规则（在锁外完成耗时操作）
+        // 预解析并更新规则缓存
+        PreparseRuleCaches(rule);
+        
+        // 编译新规则
         var newCompiledRule = new MRE().CompileRule<WebRequest>(rule);
         
         // 原子替换：无锁更新，读取时无需任何同步开销
@@ -44,6 +49,55 @@ public class WAFMiddleware {
         
         XTrace.Log.Info($"[WAFMiddleware.UpdateCompiledRule]:规则已更新 - {rule}");
     }
+    
+    /// <summary>递归预解析规则并更新缓存</summary>
+    private void PreparseRuleCaches(Rule rule)
+    {
+        if (rule == null) return;
+        
+        // 如果是叶子规则且有 RuleId 和 Inputs，预解析并写入缓存
+        if (!String.IsNullOrWhiteSpace(rule.RuleId) && rule.Inputs?.Count > 0)
+        {
+            var input = rule.Inputs[0]?.ToString();
+            if (!String.IsNullOrWhiteSpace(input))
+            {
+                switch (rule.Operator)
+                {
+                    case "IsInIpList":
+                    case "IsNotInIpList":
+                        var ipRules = WebRequest.ParseIpList(input);
+                        _cacheProvider.Cache.Set(BuildCacheKey($"IPList:{rule.RuleId}"), ipRules, 300);
+                        break;
+                    case "ContainsUserAgent":
+                    case "NotContainsUserAgent":
+                        var keywords = input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        _cacheProvider.Cache.Set(BuildCacheKey($"UAKeywords:{rule.RuleId}"), keywords, 300);
+                        break;
+                    case "IsInUserAgentList":
+                    case "IsNotInUserAgentList":
+                        var agents = input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        _cacheProvider.Cache.Set(BuildCacheKey($"UAList:{rule.RuleId}"), agents, 300);
+                        break;
+                    case "UserAgentStartsWith":
+                        var prefixes = input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        _cacheProvider.Cache.Set(BuildCacheKey($"UAPrefixes:{rule.RuleId}"), prefixes, 300);
+                        break;
+                }
+            }
+        }
+        
+        // 递归处理子规则
+        if (rule.Rules != null)
+        {
+            foreach (var childRule in rule.Rules)
+            {
+                PreparseRuleCaches(childRule);
+            }
+        }
+    }
+
+    /// <summary>构建带前缀的缓存键</summary>
+    private static String BuildCacheKey(String suffix) => $"{RedisSetting.Current.CacheKeyPrefix}:WAF:{suffix}";
 
     public async Task Invoke(HttpContext context)
     {
@@ -52,7 +106,7 @@ public class WAFMiddleware {
         // IP请求频率监控（由配置项控制）
         if (PekSysSetting.Current.EnableIpRateMonitor && !String.IsNullOrWhiteSpace(wr.RemoteIp))
         {
-            var ipKey = $"WAF:ReqCount:{wr.RemoteIp}";
+            var ipKey = BuildCacheKey($"ReqCount:{wr.RemoteIp}");
             
             // 使用 Add 原子操作：仅当 key 不存在时初始化为 0 并设置过期时间
             // Add 返回 true 表示 key 不存在并成功添加，false 表示 key 已存在

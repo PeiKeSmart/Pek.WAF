@@ -7,6 +7,7 @@ using NewLife.Caching;
 
 using Pek.Configs;
 using Pek.Helpers;
+using Pek.WAF.Extensions;
 using Pek.Webs;
 
 #if NET8_0_OR_GREATER
@@ -38,6 +39,9 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     public String? RemoteIp => _remoteIpCache ??= DHWeb.GetUserHost(request.HttpContext);
 
     public Boolean Authenticated => request.HttpContext.User.Identity?.IsAuthenticated == true;
+
+    /// <summary>构建带前缀的缓存键</summary>
+    private static String BuildCacheKey(String suffix) => $"{RedisSetting.Current.CacheKeyPrefix}:WAF:{suffix}";
 
     //private String? ipCountry;
 
@@ -105,7 +109,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
     public Boolean IpInFile(String path)
     {
-        var keyname = System.IO.Path.GetFileNameWithoutExtension(path);
+        var keyname = BuildCacheKey($"IPFile:{System.IO.Path.GetFileNameWithoutExtension(path)}");
 
         // 使用 GetOrAdd 确保并发首次请求时只有一个线程读取文件
         var data = cacheProvider.Cache.GetOrAdd<String[]>(keyname, k =>
@@ -136,6 +140,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     }
 
     /// <summary>检查当前请求的远程IP是否在指定的IP列表中</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="ipList">IP列表字符串，支持多种格式：
     /// - 精确匹配: 192.168.1.100
     /// - CIDR格式: 192.168.1.0/24
@@ -143,7 +148,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// - 多个IP用逗号或分号分隔: 192.168.1.1, 192.168.1.2; 10.0.0.1
     /// </param>
     /// <returns>如果IP在列表中返回true，否则返回false</returns>
-    public Boolean IsInIpList(String ipList)
+    public Boolean IsInIpList(String ruleId, String ipList)
     {
         // 使用 RemoteIp（DHWeb.GetUserHost）获取真实客户端 IP
         var remoteIpStr = RemoteIp;
@@ -160,15 +165,15 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
         var allowDetailLog = PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
         
-        // 使用 GetOrAdd 确保并发首次请求时只有一个线程解析规则
-        var cacheKey = $"IPList:{ipList}";
+        // 使用 RuleId 作为缓存键，规则变化时在中间件中主动更新缓存
+        var cacheKey = BuildCacheKey($"IPList:{ruleId}");
         var parsedRules = cacheProvider.Cache.GetOrAdd(cacheKey, k =>
         {
             var rules = ParseIpList(ipList);
             
             if (allowDetailLog)
             {
-                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - 规则数量:{rules.Length}, 原始列表:{ipList}");
+                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - RuleId:{ruleId}, 规则数量:{rules.Length}");
             }
             
             return rules;
@@ -197,7 +202,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             {
                 if (allowDetailLog)
                 {
-                    NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP匹配成功 - RemoteIP:{remoteIpStr}, 规则类型:{rule.Type}, 规则值:{rule.Value}");
+                    NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP匹配成功 - RemoteIP:{remoteIpStr}, RuleId:{ruleId}, 规则类型:{rule.Type}");
                 }
                 return true;
             }
@@ -205,28 +210,30 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         if (allowDetailLog)
         {
-            NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP不在列表 - RemoteIP:{remoteIpStr}, 已检查规则数:{parsedRules.Length}");
+            NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP不在列表 - RemoteIP:{remoteIpStr}, RuleId:{ruleId}");
         }
 
         return false;
     }
 
     /// <summary>检查当前请求的远程IP是否不在指定的IP列表中（白名单模式）</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="ipList">IP列表字符串，格式同IsInIpList</param>
     /// <returns>如果IP不在列表中返回true，否则返回false</returns>
-    public Boolean IsNotInIpList(String ipList) => !IsInIpList(ipList);
+    public Boolean IsNotInIpList(String ruleId, String ipList) => !IsInIpList(ruleId, ipList);
 
     /// <summary>检查当前请求的UserAgent是否包含指定列表中的任意关键字</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="keywords">关键字列表，多个关键字用逗号或分号分隔，如: "bot, spider, crawler"</param>
     /// <returns>如果包含任意关键字返回true，否则返回false</returns>
-    public Boolean ContainsUserAgent(String keywords)
+    public Boolean ContainsUserAgent(String ruleId, String keywords)
     {
         var userAgent = UserAgent;
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(keywords))
             return false;
 
-        // 使用 GetOrAdd 确保并发首次请求时只有一个线程分割字符串
-        var cacheKey = $"UAKeywords:{keywords}";
+        // 使用 RuleId 作为缓存键
+        var cacheKey = BuildCacheKey($"UAKeywords:{ruleId}");
         var keywordArray = cacheProvider.Cache.GetOrAdd(cacheKey, 
             k => keywords.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
             300); // 缓存5分钟
@@ -241,21 +248,23 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     }
 
     /// <summary>检查当前请求的UserAgent是否不包含指定列表中的任意关键字（白名单模式）</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="keywords">关键字列表，多个关键字用逗号或分号分隔</param>
     /// <returns>如果不包含任何关键字返回true，否则返回false</returns>
-    public Boolean NotContainsUserAgent(String keywords) => !ContainsUserAgent(keywords);
+    public Boolean NotContainsUserAgent(String ruleId, String keywords) => !ContainsUserAgent(ruleId, keywords);
 
     /// <summary>检查当前请求的UserAgent是否在指定的UserAgent列表中（精确匹配）</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="userAgentList">UserAgent列表，多个值用逗号或分号分隔</param>
     /// <returns>如果在列表中返回true，否则返回false</returns>
-    public Boolean IsInUserAgentList(String userAgentList)
+    public Boolean IsInUserAgentList(String ruleId, String userAgentList)
     {
         var userAgent = UserAgent;
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(userAgentList))
             return false;
 
-        // 使用 GetOrAdd 确保并发首次请求时只有一个线程分割字符串
-        var cacheKey = $"UAList:{userAgentList}";
+        // 使用 RuleId 作为缓存键
+        var cacheKey = BuildCacheKey($"UAList:{ruleId}");
         var agents = cacheProvider.Cache.GetOrAdd(cacheKey, 
             k => userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
             300); // 缓存5分钟
@@ -270,21 +279,23 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     }
 
     /// <summary>检查当前请求的UserAgent是否不在指定的UserAgent列表中（白名单模式）</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="userAgentList">UserAgent列表，多个值用逗号或分号分隔</param>
     /// <returns>如果不在列表中返回true，否则返回false</returns>
-    public Boolean IsNotInUserAgentList(String userAgentList) => !IsInUserAgentList(userAgentList);
+    public Boolean IsNotInUserAgentList(String ruleId, String userAgentList) => !IsInUserAgentList(ruleId, userAgentList);
 
     /// <summary>检查当前请求的UserAgent是否以指定的任意前缀开头</summary>
+    /// <param name="ruleId">规则唯一标识，用于缓存键</param>
     /// <param name="prefixes">前缀列表，多个前缀用逗号或分号分隔</param>
     /// <returns>如果以任意前缀开头返回true，否则返回false</returns>
-    public Boolean UserAgentStartsWith(String prefixes)
+    public Boolean UserAgentStartsWith(String ruleId, String prefixes)
     {
         var userAgent = UserAgent;
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(prefixes))
             return false;
 
-        // 使用 GetOrAdd 确保并发首次请求时只有一个线程分割字符串
-        var cacheKey = $"UAPrefixes:{prefixes}";
+        // 使用 RuleId 作为缓存键
+        var cacheKey = BuildCacheKey($"UAPrefixes:{ruleId}");
         var prefixArray = cacheProvider.Cache.GetOrAdd(cacheKey, 
             k => prefixes.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
             300); // 缓存5分钟
@@ -306,7 +317,8 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
     /// <returns>如果不为空返回true，否则返回false</returns>
     public Boolean UserAgentIsNotEmpty() => !String.IsNullOrWhiteSpace(UserAgent);
 
-    private static ParsedIpRule[] ParseIpList(String ipList)
+    /// <summary>解析 IP 列表字符串为结构化规则数组</summary>
+    public static ParsedIpRule[] ParseIpList(String ipList)
     {
         var entries = ipList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         var rules = new List<ParsedIpRule>(entries.Length);
@@ -436,12 +448,21 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         return ipSegments == 4 && patternSegments == 4;
     }
 
-    private enum IpRuleType : byte
+    /// <summary>IP 规则类型</summary>
+    public enum IpRuleType : byte
     {
+        /// <summary>精确匹配</summary>
         Exact,
+        /// <summary>CIDR 网段</summary>
         Cidr,
+        /// <summary>通配符匹配</summary>
         Wildcard
     }
 
-    private readonly record struct ParsedIpRule(IpRuleType Type, String Value, IPAddress? ParsedIp, Int32? Mask);
+    /// <summary>解析后的 IP 规则</summary>
+    /// <param name="Type">规则类型</param>
+    /// <param name="Value">原始值</param>
+    /// <param name="ParsedIp">解析后的 IP 地址</param>
+    /// <param name="Mask">CIDR 掩码位数</param>
+    public readonly record struct ParsedIpRule(IpRuleType Type, String Value, IPAddress? ParsedIp, Int32? Mask);
 }
