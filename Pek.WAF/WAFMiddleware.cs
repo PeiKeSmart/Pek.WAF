@@ -75,7 +75,10 @@ public class WAFMiddleware
                         break;
                     case "IsInUserAgentList":
                     case "IsNotInUserAgentList":
-                        var agents = input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                        // 使用 HashSet 实现 O(1) 精确匹配
+                        var agents = new HashSet<String>(
+                            input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                            StringComparer.OrdinalIgnoreCase);
                         _cacheProvider.Cache.Set(BuildCacheKey($"UAList:{rule.RuleId}"), agents, 300);
                         break;
                     case "UserAgentStartsWith":

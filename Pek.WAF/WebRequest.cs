@@ -20,6 +20,9 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 {
     private String? _remoteIpCache;
 
+    /// <summary>是否允许输出详细日志（请求级缓存，避免重复检查配置）</summary>
+    private readonly Boolean _allowDetailLog = PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
+
     public String? Method => request.Method;
 
     public String? Path => request.Path.Value;
@@ -98,8 +101,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         }
 #endif
         
-        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
-        if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        if (_allowDetailLog)
         {
             NewLife.Log.XTrace.Log.Debug($"[WebRequest.InSubnet]:子网检查 - RemoteIP:{RemoteIp}, 网络:{ip}/{mask}, 匹配:{result}");
         }
@@ -112,26 +114,26 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         var keyname = BuildCacheKey($"IPFile:{System.IO.Path.GetFileNameWithoutExtension(path)}");
 
         // 使用 GetOrAdd 确保并发首次请求时只有一个线程读取文件
-        var data = cacheProvider.Cache.GetOrAdd<String[]>(keyname, k =>
+        // 使用 HashSet 实现 O(1) 查找，替代数组的 O(n) 线性查找
+        var data = cacheProvider.Cache.GetOrAdd<HashSet<String>>(keyname, k =>
         {
             if (!File.Exists(path))
                 return [];
                 
             var lines = File.ReadAllLines(path);
+            var hashSet = new HashSet<String>(lines, StringComparer.OrdinalIgnoreCase);
             
-            // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
-            if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+            if (_allowDetailLog)
             {
-                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:加载IP文件 - 文件:{path}, IP数量:{lines.Length}");
+                NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:加载IP文件 - 文件:{path}, IP数量:{hashSet.Count}");
             }
             
-            return lines;
+            return hashSet;
         }, 15 * 60);
 
-        var result = data.Length > 0 && data.Contains(RemoteIp, StringComparer.OrdinalIgnoreCase);
+        var result = data.Count > 0 && data.Contains(RemoteIp!);
         
-        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
-        if (PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)
+        if (_allowDetailLog)
         {
             NewLife.Log.XTrace.Log.Debug($"[WebRequest.IpInFile]:IP文件检查 - RemoteIP:{RemoteIp}, 文件:{path}, 匹配:{result}");
         }
@@ -162,16 +164,13 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             return false;
         }
 
-        // 根据 PekSysSetting.Current.AllowRequestParams 或日志级别判断是否输出详细日志
-        var allowDetailLog = PekSysSetting.Current.AllowRequestParams || NewLife.Log.XTrace.Log.Level <= NewLife.Log.LogLevel.Debug;
-        
         // 使用 RuleId 作为缓存键，规则变化时在中间件中主动更新缓存
         var cacheKey = BuildCacheKey($"IPList:{ruleId}");
         var parsedRules = cacheProvider.Cache.GetOrAdd(cacheKey, k =>
         {
             var rules = ParseIpList(ipList);
             
-            if (allowDetailLog)
+            if (_allowDetailLog)
             {
                 NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:解析IP列表 - RuleId:{ruleId}, 规则数量:{rules.Length}");
             }
@@ -200,7 +199,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             
             if (matched)
             {
-                if (allowDetailLog)
+                if (_allowDetailLog)
                 {
                     NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP匹配成功 - RemoteIP:{remoteIpStr}, RuleId:{ruleId}, 规则类型:{rule.Type}");
                 }
@@ -208,7 +207,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
             }
         }
 
-        if (allowDetailLog)
+        if (_allowDetailLog)
         {
             NewLife.Log.XTrace.Log.Debug($"[WebRequest.IsInIpList]:IP不在列表 - RemoteIP:{remoteIpStr}, RuleId:{ruleId}");
         }
@@ -263,19 +262,15 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
         if (String.IsNullOrWhiteSpace(userAgent) || String.IsNullOrWhiteSpace(userAgentList))
             return false;
 
-        // 使用 RuleId 作为缓存键
+        // 使用 RuleId 作为缓存键，使用 HashSet 实现 O(1) 精确匹配
         var cacheKey = BuildCacheKey($"UAList:{ruleId}");
         var agents = cacheProvider.Cache.GetOrAdd(cacheKey, 
-            k => userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
+            k => new HashSet<String>(
+                userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                StringComparer.OrdinalIgnoreCase), 
             300); // 缓存5分钟
 
-        foreach (var agent in agents)
-        {
-            if (!String.IsNullOrEmpty(agent) && String.Equals(userAgent, agent, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
-        return false;
+        return agents.Contains(userAgent);
     }
 
     /// <summary>检查当前请求的UserAgent是否不在指定的UserAgent列表中（白名单模式）</summary>
