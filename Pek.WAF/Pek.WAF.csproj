@@ -47,12 +47,12 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.202">
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.203">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Pek.AspNetCore" Version="4.22.2026.415-beta0907" />
-    <PackageReference Include="Pek.Common" Version="4.22.2026.415-beta1156" />
+    <PackageReference Include="Pek.AspNetCore" Version="4.22.2026.501-beta1705" />
+    <PackageReference Include="Pek.Common" Version="4.22.2026.416-beta1017" />
   </ItemGroup>
 
   <ItemGroup>

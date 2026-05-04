@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Options;
 
 using NewLife.Caching;
 using NewLife.Log;
@@ -66,12 +66,12 @@ public class WAFMiddleware
                     case "IsInIpList":
                     case "IsNotInIpList":
                         var ipRules = WebRequest.ParseIpList(input);
-                        _cacheProvider.Cache.Set(BuildCacheKey($"IPList:{rule.RuleId}"), ipRules, 300);
+                        _cacheProvider.InnerCache.Set(BuildCacheKey($"IPList:{rule.RuleId}"), ipRules, 300);
                         break;
                     case "ContainsUserAgent":
                     case "NotContainsUserAgent":
                         var keywords = input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                        _cacheProvider.Cache.Set(BuildCacheKey($"UAKeywords:{rule.RuleId}"), keywords, 300);
+                        _cacheProvider.InnerCache.Set(BuildCacheKey($"UAKeywords:{rule.RuleId}"), keywords, 300);
                         break;
                     case "IsInUserAgentList":
                     case "IsNotInUserAgentList":
@@ -79,11 +79,11 @@ public class WAFMiddleware
                         var agents = new HashSet<String>(
                             input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
                             StringComparer.OrdinalIgnoreCase);
-                        _cacheProvider.Cache.Set(BuildCacheKey($"UAList:{rule.RuleId}"), agents, 300);
+                        _cacheProvider.InnerCache.Set(BuildCacheKey($"UAList:{rule.RuleId}"), agents, 300);
                         break;
                     case "UserAgentStartsWith":
                         var prefixes = input.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                        _cacheProvider.Cache.Set(BuildCacheKey($"UAPrefixes:{rule.RuleId}"), prefixes, 300);
+                        _cacheProvider.InnerCache.Set(BuildCacheKey($"UAPrefixes:{rule.RuleId}"), prefixes, 300);
                         break;
                 }
             }
@@ -114,10 +114,10 @@ public class WAFMiddleware
             // 使用 Add 原子操作：仅当 key 不存在时初始化为 0 并设置过期时间
             // Add 返回 true 表示 key 不存在并成功添加，false 表示 key 已存在
             // 这样无论多少并发请求同时到达，只有一个会成功初始化
-            _cacheProvider.Cache.Add(ipKey, 0, IpWindowMinutes * 60);
+            _cacheProvider.InnerCache.Add(ipKey, 0, IpWindowMinutes * 60);
             
             // Increment 原子递增，无论 Add 是否成功都执行
-            var count = _cacheProvider.Cache.Increment(ipKey, 1);
+            var count = _cacheProvider.InnerCache.Increment(ipKey, 1);
             
             // 仅在调试模式时输出详细日志，避免高并发下的日志性能开销
             if (XTrace.Log.Level <= NewLife.Log.LogLevel.Debug)

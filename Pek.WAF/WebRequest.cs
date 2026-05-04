@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Sockets;
 
 using Microsoft.Net.Http.Headers;
@@ -115,7 +115,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         // 使用 GetOrAdd 确保并发首次请求时只有一个线程读取文件
         // 使用 HashSet 实现 O(1) 查找，替代数组的 O(n) 线性查找
-        var data = cacheProvider.Cache.GetOrAdd<HashSet<String>>(keyname, k =>
+        var data = cacheProvider.InnerCache.GetOrAdd<HashSet<String>>(keyname, k =>
         {
             if (!File.Exists(path))
                 return [];
@@ -166,7 +166,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         // 使用 RuleId 作为缓存键，规则变化时在中间件中主动更新缓存
         var cacheKey = BuildCacheKey($"IPList:{ruleId}");
-        var parsedRules = cacheProvider.Cache.GetOrAdd(cacheKey, k =>
+        var parsedRules = cacheProvider.InnerCache.GetOrAdd(cacheKey, k =>
         {
             var rules = ParseIpList(ipList);
             
@@ -233,7 +233,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         // 使用 RuleId 作为缓存键
         var cacheKey = BuildCacheKey($"UAKeywords:{ruleId}");
-        var keywordArray = cacheProvider.Cache.GetOrAdd(cacheKey, 
+        var keywordArray = cacheProvider.InnerCache.GetOrAdd(cacheKey, 
             k => keywords.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
             300); // 缓存5分钟
 
@@ -264,7 +264,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         // 使用 RuleId 作为缓存键，使用 HashSet 实现 O(1) 精确匹配
         var cacheKey = BuildCacheKey($"UAList:{ruleId}");
-        var agents = cacheProvider.Cache.GetOrAdd(cacheKey, 
+        var agents = cacheProvider.InnerCache.GetOrAdd(cacheKey, 
             k => new HashSet<String>(
                 userAgentList.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
                 StringComparer.OrdinalIgnoreCase), 
@@ -291,7 +291,7 @@ public record WebRequest(HttpRequest request, ICacheProvider cacheProvider)
 
         // 使用 RuleId 作为缓存键
         var cacheKey = BuildCacheKey($"UAPrefixes:{ruleId}");
-        var prefixArray = cacheProvider.Cache.GetOrAdd(cacheKey, 
+        var prefixArray = cacheProvider.InnerCache.GetOrAdd(cacheKey, 
             k => prefixes.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries), 
             300); // 缓存5分钟
 
